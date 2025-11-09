@@ -1,5 +1,5 @@
 // =======================
-// server.js — FINAL FIXED VERSION
+// server.js — UPDATED FINAL VERSION
 // =======================
 const express = require("express");
 const http = require("http");
@@ -35,12 +35,14 @@ const sheets = google.sheets({ version: "v4", auth });
 // =======================
 const app = express();
 const server = http.createServer(app);
+
+// ✅ FIXED: Allow both websocket and polling to prevent 400 Bad Request
 const io = new Server(server, {
   cors: {
     origin: "*",
     methods: ["GET", "POST"],
   },
-  transports: ["websocket"], // Prefer WebSocket transport
+  transports: ["websocket", "polling"], // <-- fix applied here
 });
 
 // Serve client files
