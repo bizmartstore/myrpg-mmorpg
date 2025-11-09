@@ -1,5 +1,5 @@
 // =======================
-// server.js
+// server.js — FINAL FIXED VERSION
 // =======================
 const express = require("express");
 const http = require("http");
@@ -25,22 +25,22 @@ const SHEET_RANGE = "PlayerData!A2:Z";
 
 const auth = new google.auth.GoogleAuth({
   credentials,
-  scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+  scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
 });
 
 const sheets = google.sheets({ version: "v4", auth });
 
 // =======================
-// Express + Socket.IO
+// Express + Socket.IO Setup
 // =======================
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: "*",          // allow all origins
-    methods: ["GET", "POST"] // required for CORS
+    origin: "*",
+    methods: ["GET", "POST"],
   },
-  transports: ["websocket"] // force WebSocket (avoid polling CORS issues)
+  transports: ["websocket"], // Prefer WebSocket transport
 });
 
 // Serve client files
@@ -49,10 +49,10 @@ app.use(express.static(path.join(__dirname, "public")));
 // =======================
 // Game State
 // =======================
-let players = {}; // { socketId: {x, y, dir, attacking, images} }
+let players = {}; // { socketId: { ...playerData } }
 
 // =======================
-// Utility: Get Player Data
+// Utility: Fetch Player Data from Sheets
 // =======================
 async function getPlayerDataByEmail(email) {
   try {
@@ -76,85 +76,102 @@ async function getPlayerDataByEmail(email) {
 
     for (const row of rows) {
       const obj = {};
-      row.forEach((val, i) => keys[i] && (obj[keys[i]] = val));
-      if (obj.Email === email) return obj;
+      row.forEach((val, i) => (keys[i] && (obj[keys[i]] = val)));
+      if (obj.Email?.trim().toLowerCase() === email.trim().toLowerCase()) return obj;
     }
     return null;
   } catch (err) {
-    console.error("Error fetching player data:", err);
+    console.error("❌ Error fetching player data:", err);
     return null;
   }
 }
 
 // =======================
-// Socket.IO
+// Socket.IO Handlers
 // =======================
 io.on("connection", async (socket) => {
-  console.log("🟢 Player connected:", socket.id);
+  try {
+    const email = socket.handshake.auth?.email || "guest@local";
+    console.log(`🟢 Player connected (${socket.id}) -> ${email}`);
 
-  // Get email from query params
-  const email = socket.handshake.query.email;
-  const pdata = await getPlayerDataByEmail(email);
+    const pdata = await getPlayerDataByEmail(email);
 
-  if (!pdata) {
-    console.warn("⚠️ Player data not found for email:", email);
-    socket.disconnect();
-    return;
-  }
-
-  // Initialize player state
-  players[socket.id] = {
-    x: Number(pdata.PositionX || 0),
-    y: Number(pdata.PositionY || 0),
-    lastDir: pdata.MovementAnimation || "down",
-    attacking: false,
-    images: {
-      idleFront: pdata.ImageURL_IdleFront,
-      idleBack: pdata.ImageURL_IdleBack,
-      walkLeft: pdata.ImageURL_Walk_Left,
-      walkRight: pdata.ImageURL_Walk_Right,
-      walkUp: pdata.ImageURL_Walk_Up,
-      walkDown: pdata.ImageURL_Walk_Down,
-      attackLeft: pdata.ImageURL_Attack_Left,
-      attackRight: pdata.ImageURL_Attack_Right
+    if (!pdata) {
+      console.warn(`⚠️ No player found for email: ${email}`);
+      socket.emit("noCharacterFound", { email });
+      return;
     }
-  };
 
-  // Send current players to the new player
-  socket.emit("currentPlayers", players);
+    // Initialize player state
+    players[socket.id] = {
+      id: socket.id,
+      email: email,
+      name: pdata.CharacterName || pdata.PlayerName || "Unnamed",
+      class: pdata.CharacterClass || "Adventurer",
+      x: Number(pdata.PositionX || 300),
+      y: Number(pdata.PositionY || 300),
+      lastDir: pdata.MovementAnimation || "down",
+      attacking: false,
+      images: {
+        idleFront: pdata.ImageURL_IdleFront || "",
+        idleBack: pdata.ImageURL_IdleBack || "",
+        walkLeft: pdata.ImageURL_Walk_Left || "",
+        walkRight: pdata.ImageURL_Walk_Right || "",
+        walkUp: pdata.ImageURL_Walk_Up || "",
+        walkDown: pdata.ImageURL_Walk_Down || "",
+        attackLeft: pdata.ImageURL_Attack_Left || "",
+        attackRight: pdata.ImageURL_Attack_Right || "",
+      },
+    };
 
-  // Notify others about new player
-  socket.broadcast.emit("newPlayer", { id: socket.id, ...players[socket.id] });
+    // Send all current players to the new one
+    socket.emit("currentPlayers", players);
 
-  // Player movement
-  socket.on("move", (data) => {
-    if (!players[socket.id]) return;
-    players[socket.id].x = data.x;
-    players[socket.id].y = data.y;
-    players[socket.id].lastDir = data.lastDir;
-    players[socket.id].attacking = data.attacking || false;
+    // Notify others about the new player
+    socket.broadcast.emit("newPlayer", { id: socket.id, ...players[socket.id] });
 
-    socket.broadcast.emit("playerMoved", { id: socket.id, ...players[socket.id] });
-  });
+    // === Player movement ===
+    socket.on("move", (data) => {
+      try {
+        if (!players[socket.id]) return;
+        players[socket.id].x = data.x;
+        players[socket.id].y = data.y;
+        players[socket.id].lastDir = data.lastDir;
+        players[socket.id].attacking = data.attacking || false;
 
-  // Attack animation
-  socket.on("attack", (data) => {
-    if (!players[socket.id]) return;
-    players[socket.id].attacking = true;
-    socket.broadcast.emit("playerAttacked", { id: socket.id, dir: data.dir });
+        socket.broadcast.emit("playerMoved", { id: socket.id, ...players[socket.id] });
+      } catch (err) {
+        console.error("⚠️ Error in move event:", err);
+      }
+    });
 
-    // Reset attacking
-    setTimeout(() => {
-      if (players[socket.id]) players[socket.id].attacking = false;
-    }, 400);
-  });
+    // === Player attack ===
+    socket.on("attack", (data) => {
+      try {
+        if (!players[socket.id]) return;
+        players[socket.id].attacking = true;
+        socket.broadcast.emit("playerAttacked", { id: socket.id, dir: data.dir });
 
-  // Disconnect
-  socket.on("disconnect", () => {
-    console.log("🔴 Player disconnected:", socket.id);
-    delete players[socket.id];
-    socket.broadcast.emit("playerDisconnected", socket.id);
-  });
+        // Reset attacking animation after short delay
+        setTimeout(() => {
+          if (players[socket.id]) players[socket.id].attacking = false;
+        }, 400);
+      } catch (err) {
+        console.error("⚠️ Error in attack event:", err);
+      }
+    });
+
+    // === Player disconnect ===
+    socket.on("disconnect", () => {
+      console.log(`🔴 Player disconnected (${socket.id}) -> ${email}`);
+      delete players[socket.id];
+      socket.broadcast.emit("playerDisconnected", socket.id);
+    });
+
+  } catch (err) {
+    console.error("💥 Socket connection error:", err);
+    socket.emit("errorMsg", { message: "Server error. Please reconnect." });
+  }
 });
 
 // =======================
