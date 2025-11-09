@@ -11,11 +11,8 @@ const path = require("path");
 // =======================
 // Environment Variables
 // =======================
-// PORT is automatically assigned by Render
 const PORT = process.env.PORT || 3000;
 
-// Optional: Store Google service account JSON in ENV for security
-// Example: process.env.GOOGLE_CREDENTIALS
 const credentials = process.env.GOOGLE_CREDENTIALS
   ? JSON.parse(process.env.GOOGLE_CREDENTIALS)
   : JSON.parse(fs.readFileSync(path.join(__dirname, "credentials.json")));
@@ -39,20 +36,23 @@ const sheets = google.sheets({ version: "v4", auth });
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: "*" }, // allow all origins
+  cors: {
+    origin: "*",          // allow all origins
+    methods: ["GET", "POST"] // required for CORS
+  },
+  transports: ["websocket"] // force WebSocket (avoid polling CORS issues)
 });
 
-// Serve client files from /public
+// Serve client files
 app.use(express.static(path.join(__dirname, "public")));
 
 // =======================
 // Game State
 // =======================
 let players = {}; // { socketId: {x, y, dir, attacking, images} }
-let monsters = {}; // future monsters
 
 // =======================
-// Utility: Get Player Data from Google Sheets
+// Utility: Get Player Data
 // =======================
 async function getPlayerDataByEmail(email) {
   try {
@@ -96,21 +96,27 @@ io.on("connection", async (socket) => {
   const email = socket.handshake.query.email;
   const pdata = await getPlayerDataByEmail(email);
 
+  if (!pdata) {
+    console.warn("⚠️ Player data not found for email:", email);
+    socket.disconnect();
+    return;
+  }
+
   // Initialize player state
   players[socket.id] = {
-    x: Number(pdata?.PositionX || 0),
-    y: Number(pdata?.PositionY || 0),
-    lastDir: pdata?.MovementAnimation || "down",
+    x: Number(pdata.PositionX || 0),
+    y: Number(pdata.PositionY || 0),
+    lastDir: pdata.MovementAnimation || "down",
     attacking: false,
     images: {
-      idleFront: pdata?.ImageURL_IdleFront,
-      idleBack: pdata?.ImageURL_IdleBack,
-      walkLeft: pdata?.ImageURL_Walk_Left,
-      walkRight: pdata?.ImageURL_Walk_Right,
-      walkUp: pdata?.ImageURL_Walk_Up,
-      walkDown: pdata?.ImageURL_Walk_Down,
-      attackLeft: pdata?.ImageURL_Attack_Left,
-      attackRight: pdata?.ImageURL_Attack_Right
+      idleFront: pdata.ImageURL_IdleFront,
+      idleBack: pdata.ImageURL_IdleBack,
+      walkLeft: pdata.ImageURL_Walk_Left,
+      walkRight: pdata.ImageURL_Walk_Right,
+      walkUp: pdata.ImageURL_Walk_Up,
+      walkDown: pdata.ImageURL_Walk_Down,
+      attackLeft: pdata.ImageURL_Attack_Left,
+      attackRight: pdata.ImageURL_Attack_Right
     }
   };
 
