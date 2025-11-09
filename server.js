@@ -21,7 +21,7 @@ const credentials = process.env.GOOGLE_CREDENTIALS
 // Google Sheets Setup
 // =======================
 const SHEET_ID = "1U3MFNEf7G32Gs10Z0s0NoiZ6PPP1TgsEVbRUFcmjr7Y";
-const SHEET_RANGE = "PlayerData!A2:Z";
+const SHEET_RANGE = "PlayerData!A2:ZZ";
 
 const auth = new google.auth.GoogleAuth({
   credentials,
