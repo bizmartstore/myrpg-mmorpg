@@ -414,34 +414,68 @@ io.on('connection', (socket) => {
     broadcastToAOI(currentPlayer.email, position.x, position.y, currentPlayer.map, 'player:skill', { email: currentPlayer.email, skillType, position, direction, data: skillData });
   });
 
-  socket.on('player:changeMap', (data) => {
-    if (!currentPlayer) return;
-    const { map, position } = data;
-    const oldMap = currentPlayer.map;
+ socket.on('player:changeMap', (data) => {
+  if (!currentPlayer) return;
+  const { map, position } = data;
+  const oldMap = currentPlayer.map;
 
-    if (mapPlayers.has(oldMap)) mapPlayers.get(oldMap).delete(currentPlayer.email);
-    broadcastToMap(oldMap, 'player:left', currentPlayer.email);
+  // Remove from old map
+  if (mapPlayers.has(oldMap)) mapPlayers.get(oldMap).delete(currentPlayer.email);
+  broadcastToMap(oldMap, 'player:left', currentPlayer.email);
 
-    currentPlayer.map = map;
-    currentPlayer.x = position.x;
-    currentPlayer.y = position.y;
+  // Update player state
+  currentPlayer.map = map;
+  currentPlayer.x = position.x;
+  currentPlayer.y = position.y;
 
-    if (!mapPlayers.has(map)) mapPlayers.set(map, new Set());
-    mapPlayers.get(map).add(currentPlayer.email);
+  // Add to new map
+  if (!mapPlayers.has(map)) mapPlayers.set(map, new Set());
+  mapPlayers.get(map).add(currentPlayer.email);
 
-    const nearby = getPlayersInAOI(currentPlayer.email, position.x, position.y, map);
-    nearby.forEach(p => socket.emit('player:joined', p));
+  // 🔥🔥🔥 FIX START 🔥🔥🔥
 
-    broadcastToAOI(currentPlayer.email, position.x, position.y, map, 'player:joined', {
-      email: currentPlayer.email,
-      name: currentPlayer.name,
-      character_class: currentPlayer.character_class,
-      level: currentPlayer.level,
-      position,
-      direction: currentPlayer.direction,
-      state: currentPlayer.state
-    });
+  // Ensure monsters exist for this map
+  spawnMonsters(map);
+
+  // Send all existing monsters in this map to THIS player
+  const monstersInMap = mapMonsters.get(map) || new Set();
+  for (const monsterId of monstersInMap) {
+    const m = monsters.get(monsterId);
+    if (m && m.hp > 0) {
+      socket.emit('monster:spawn', {
+        id: m.id,
+        type: m.type,
+        x: m.x,
+        y: m.y,
+        hp: m.hp,
+        maxHp: m.maxHp,
+        direction: m.direction,
+        state: m.state,
+        spawnX: m.spawnX,
+        spawnY: m.spawnY,
+        target: m.target
+      });
+    }
+  }
+
+  // 🔥🔥🔥 FIX END 🔥🔥🔥
+
+  // Send nearby players
+  const nearby = getPlayersInAOI(currentPlayer.email, position.x, position.y, map);
+  nearby.forEach(p => socket.emit('player:joined', p));
+
+  // Notify others
+  broadcastToAOI(currentPlayer.email, position.x, position.y, map, 'player:joined', {
+    email: currentPlayer.email,
+    name: currentPlayer.name,
+    character_class: currentPlayer.character_class,
+    level: currentPlayer.level,
+    position,
+    direction: currentPlayer.direction,
+    state: currentPlayer.state
   });
+});
+
 
   socket.on('disconnect', () => {
     if (!currentPlayer) return;
