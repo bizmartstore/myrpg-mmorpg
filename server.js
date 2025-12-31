@@ -1,7 +1,7 @@
 /*
  * ETERNAL QUEST - MULTIPLAYER SERVER
  *
- * Full ready-to-run server.js
+ * Full ready-to-run server.js with XP & Loot system
  *
  * Setup:
  * 1. Save this as server.js in your project root
@@ -46,10 +46,10 @@ const MONSTER_SPAWNS = {
 };
 
 const MONSTER_STATS = {
-  poring: { hp: 50, attack: 5, speed: 1.5, aggro: 150, attackRange: 40, cooldown: 1500 },
-  lunatic: { hp: 60, attack: 8, speed: 2, aggro: 180, attackRange: 50, cooldown: 1300 },
-  fabre: { hp: 45, attack: 6, speed: 1.8, aggro: 160, attackRange: 45, cooldown: 1400 },
-  chonchon: { hp: 55, attack: 7, speed: 2.2, aggro: 200, attackRange: 60, cooldown: 1200 }
+  poring: { hp: 50, attack: 5, speed: 1.5, aggro: 150, attackRange: 40, cooldown: 1500, xp: 5, loot: ['potion'] },
+  lunatic: { hp: 60, attack: 8, speed: 2, aggro: 180, attackRange: 50, cooldown: 1300, xp: 8, loot: ['potion', 'coin'] },
+  fabre: { hp: 45, attack: 6, speed: 1.8, aggro: 160, attackRange: 45, cooldown: 1400, xp: 6, loot: ['coin'] },
+  chonchon: { hp: 55, attack: 7, speed: 2.2, aggro: 200, attackRange: 60, cooldown: 1200, xp: 10, loot: ['potion', 'coin', 'gem'] }
 };
 
 // Distance helper
@@ -103,9 +103,9 @@ function broadcastToMap(mapId, event, data) {
   }
 }
 
-// Spawn monsters (fixed to prevent duplicates)
+// Spawn monsters
 function spawnMonsters(mapId) {
-  if (mapMonstersSpawned.get(mapId)) return; // Already spawned
+  if (mapMonstersSpawned.get(mapId)) return;
   mapMonstersSpawned.set(mapId, true);
 
   const config = MONSTER_SPAWNS[mapId];
@@ -156,7 +156,6 @@ function spawnMonsters(mapId) {
 }
 
 // ------------------ Monster AI ------------------
-
 function updateMonsterAI() {
   const now = Date.now();
   for (const [monsterId, monster] of monsters.entries()) {
@@ -238,7 +237,6 @@ function updateMonsterAI() {
 setInterval(updateMonsterAI, 100);
 
 // ------------------ Player & Monster Broadcast ------------------
-
 setInterval(() => {
   for (const [email, player] of players.entries()) {
     if (!player.socketId) continue;
@@ -274,14 +272,13 @@ setInterval(() => {
 }, 50);
 
 // ------------------ Socket.IO Events ------------------
-
 io.on('connection', (socket) => {
   console.log('Player connected:', socket.id);
   let currentPlayer = null;
 
   socket.on('player:join', (data) => {
     const { email, name, character_class, level, position, map } = data;
-    currentPlayer = { email, name, character_class, level, x: position.x, y: position.y, direction: 'front', state: 'idle', map, socketId: socket.id, lastUpdate: Date.now() };
+    currentPlayer = { email, name, character_class, level, x: position.x, y: position.y, direction: 'front', state: 'idle', map, socketId: socket.id, lastUpdate: Date.now(), xp: 0, inventory: [] };
     players.set(email, currentPlayer);
 
     if (!mapPlayers.has(map)) mapPlayers.set(map, new Set());
@@ -320,6 +317,47 @@ io.on('connection', (socket) => {
     });
   });
 
+  // ------------------ Player Attacks Monster ------------------
+  socket.on('monster:hit', (data) => {
+    if (!currentPlayer) return;
+    const { monsterId, damage } = data;
+    const monster = monsters.get(monsterId);
+    if (!monster) return;
+
+    monster.hp = Math.max(0, monster.hp - damage);
+    monster.lastHitBy = currentPlayer.email; // Track killer
+
+    broadcastToMap(monster.mapId, 'monster:hit', { id: monsterId, hp: monster.hp, damage });
+
+    if (monster.hp <= 0) {
+      // Monster defeated
+      broadcastToMap(monster.mapId, 'monster:despawn', { id: monsterId });
+
+      const killer = players.get(monster.lastHitBy);
+      if (killer) {
+        const stats = MONSTER_STATS[monster.type];
+        // Award XP
+        killer.xp += stats.xp;
+        // Award Loot (random from loot array)
+        const lootItem = stats.loot[Math.floor(Math.random() * stats.loot.length)];
+        killer.inventory.push(lootItem);
+
+        io.to(killer.socketId).emit('monster:killed', { monsterId, xp: stats.xp, loot: lootItem });
+      }
+
+      setTimeout(() => {
+        // Respawn monster
+        monster.hp = monster.maxHp;
+        monster.x = monster.spawnX;
+        monster.y = monster.spawnY;
+        monster.state = 'idle';
+        monster.target = null;
+        broadcastToMap(monster.mapId, 'monster:spawn', { id: monsterId, type: monster.type, x: monster.x, y: monster.y, hp: monster.hp, maxHp: monster.maxHp });
+      }, 5000);
+    }
+  });
+
+  // ------------------ Other Player Events ------------------
   socket.on('player:move', (data) => {
     if (!currentPlayer) return;
     const { position, direction, state, map } = data;
@@ -403,28 +441,6 @@ io.on('connection', (socket) => {
       direction: currentPlayer.direction,
       state: currentPlayer.state
     });
-  });
-
-  socket.on('monster:hit', (data) => {
-    if (!currentPlayer) return;
-    const { monsterId, damage } = data;
-    const monster = monsters.get(monsterId);
-    if (!monster) return;
-    monster.hp = Math.max(0, monster.hp - damage);
-
-    broadcastToMap(monster.mapId, 'monster:hit', { id: monsterId, hp: monster.hp, damage });
-
-    if (monster.hp <= 0) {
-      broadcastToMap(monster.mapId, 'monster:despawn', { id: monsterId });
-      setTimeout(() => {
-        monster.hp = monster.maxHp;
-        monster.x = monster.spawnX;
-        monster.y = monster.spawnY;
-        monster.state = 'idle';
-        monster.target = null;
-        broadcastToMap(monster.mapId, 'monster:spawn', { id: monsterId, type: monster.type, x: monster.x, y: monster.y, hp: monster.hp, maxHp: monster.maxHp });
-      }, 5000);
-    }
   });
 
   socket.on('disconnect', () => {
