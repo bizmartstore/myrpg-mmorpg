@@ -34,6 +34,7 @@ const mapPlayers = new Map(); // mapId -> Set of emails
 // Monster data
 const monsters = new Map(); // monsterId -> monster object
 const mapMonsters = new Map(); // mapId -> Set of monsterIds
+const mapMonstersSpawned = new Map(); // mapId -> boolean (spawned flag)
 
 // Monster spawn config
 const MONSTER_SPAWNS = {
@@ -102,8 +103,11 @@ function broadcastToMap(mapId, event, data) {
   }
 }
 
-// Spawn monsters
+// Spawn monsters (fixed to prevent duplicates)
 function spawnMonsters(mapId) {
+  if (mapMonstersSpawned.get(mapId)) return; // Already spawned
+  mapMonstersSpawned.set(mapId, true);
+
   const config = MONSTER_SPAWNS[mapId];
   if (!config) return;
   if (!mapMonsters.has(mapId)) mapMonsters.set(mapId, new Set());
@@ -111,7 +115,7 @@ function spawnMonsters(mapId) {
   for (let i = 0; i < config.count; i++) {
     const type = config.types[Math.floor(Math.random() * config.types.length)];
     const stats = MONSTER_STATS[type];
-    const monsterId = `${mapId}_${type}_${Date.now()}_${i}`;
+    const monsterId = `${mapId}_${type}_${i}`; // unique per map and type
     const monster = {
       id: monsterId,
       type,
@@ -147,9 +151,12 @@ function spawnMonsters(mapId) {
       maxHp: monster.maxHp
     });
   }
+
+  console.log(`✅ Spawned ${config.count} monsters for map ${mapId}`);
 }
 
-// Monster AI
+// ------------------ Monster AI and other code remains untouched ------------------
+
 function updateMonsterAI() {
   const now = Date.now();
   for (const [monsterId, monster] of monsters.entries()) {
@@ -254,18 +261,22 @@ setInterval(() => {
   }
 }, 50);
 
-// Broadcast monster states every 50ms
+// Broadcast monster states every 50ms with full info for proper rendering
 setInterval(() => {
   for (const [monsterId, monster] of monsters.entries()) {
     if (monster.hp <= 0) continue;
     broadcastToMap(monster.mapId, 'monster:update', {
       id: monsterId,
+      type: monster.type,          // include type so client knows which monster it is
       x: monster.x,
       y: monster.y,
       direction: monster.direction,
       state: monster.state,
       hp: monster.hp,
-      timestamp: Date.now()
+      maxHp: monster.maxHp,        // include max HP for proper health bar rendering
+      spawnX: monster.spawnX,      // optional: spawn position
+      spawnY: monster.spawnY,
+      target: monster.target       // optional: if client wants to show target
     });
   }
 }, 50);
@@ -275,7 +286,7 @@ io.on('connection', (socket) => {
   console.log('Player connected:', socket.id);
   let currentPlayer = null;
 
-  // Player joins
+  // --- Player join ---
   socket.on('player:join', (data) => {
     const { email, name, character_class, level, position, map } = data;
     currentPlayer = { email, name, character_class, level, x: position.x, y: position.y, direction: 'front', state: 'idle', map, socketId: socket.id, lastUpdate: Date.now() };
@@ -286,28 +297,47 @@ io.on('connection', (socket) => {
 
     console.log(`Player ${name} joined map ${map}`);
 
-    // Spawn monsters if first player
-    const playersInMap = mapPlayers.get(map) || new Set();
-    if (playersInMap.size === 1 && MONSTER_SPAWNS[map]) spawnMonsters(map);
+    // Spawn monsters if first time only
+    spawnMonsters(map);
 
-    // Send existing monsters
-    const monstersInMap = mapMonsters.get(map) || new Set();
-    for (const monsterId of monstersInMap) {
-      const m = monsters.get(monsterId);
-      if (m && m.hp > 0) {
-        socket.emit('monster:spawn', { id: m.id, type: m.type, x: m.x, y: m.y, hp: m.hp, maxHp: m.maxHp });
-      }
-    }
+    // Send existing monsters with full info on join
+const monstersInMap = mapMonsters.get(map) || new Set();
+for (const monsterId of monstersInMap) {
+  const m = monsters.get(monsterId);
+  if (m && m.hp > 0) {
+    socket.emit('monster:spawn', { 
+      id: m.id,
+      type: m.type,
+      x: m.x,
+      y: m.y,
+      hp: m.hp,
+      maxHp: m.maxHp,
+      direction: m.direction,   // current direction
+      state: m.state,           // current state (idle, chasing, attacking)
+      spawnX: m.spawnX,         // initial spawn position X
+      spawnY: m.spawnY,         // initial spawn position Y
+      target: m.target          // current target player email (if any)
+    });
+  }
+}
 
-    // Nearby players
-    const nearby = getPlayersInAOI(email, position.x, position.y, map);
-    nearby.forEach(p => socket.emit('player:joined', p));
+// Nearby players
+const nearby = getPlayersInAOI(email, position.x, position.y, map);
+nearby.forEach(p => socket.emit('player:joined', p));
 
-    // Notify AOI
-    broadcastToAOI(email, position.x, position.y, map, 'player:joined', { email, name, character_class, level, position, direction: 'front', state: 'idle' });
-  });
+// Notify AOI
+broadcastToAOI(email, position.x, position.y, map, 'player:joined', { 
+  email, 
+  name, 
+  character_class, 
+  level, 
+  position, 
+  direction: 'front', 
+  state: 'idle' 
+});
 
-  // Player moves
+
+  // --- Player moves ---
   socket.on('player:move', (data) => {
     if (!currentPlayer) return;
     const { position, direction, state, map } = data;
@@ -354,21 +384,21 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Player attacks
+  // --- Player attacks ---
   socket.on('player:attack', (data) => {
     if (!currentPlayer) return;
     const { position, direction, damage } = data;
     broadcastToAOI(currentPlayer.email, position.x, position.y, currentPlayer.map, 'player:attacked', { email: currentPlayer.email, position, direction, damage });
   });
 
-  // Player skills
+  // --- Player skills ---
   socket.on('player:skill', (data) => {
     if (!currentPlayer) return;
     const { skillType, position, direction, data: skillData } = data;
     broadcastToAOI(currentPlayer.email, position.x, position.y, currentPlayer.map, 'player:skill', { email: currentPlayer.email, skillType, position, direction, data: skillData });
   });
 
-  // Player changes map
+  // --- Player changes map ---
   socket.on('player:changeMap', (data) => {
     if (!currentPlayer) return;
     const { map, position } = data;
@@ -398,7 +428,7 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Monster hit
+  // --- Monster hit ---
   socket.on('monster:hit', (data) => {
     if (!currentPlayer) return;
     const { monsterId, damage } = data;
@@ -421,7 +451,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Player disconnects
+  // --- Player disconnects ---
   socket.on('disconnect', () => {
     if (!currentPlayer) return;
     console.log(`Player ${currentPlayer.name} disconnected`);
