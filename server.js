@@ -640,6 +640,7 @@ socket.on('disconnect', () => {
 
   players.delete(currentPlayer.email);
 });
+});
 
 
 // Start server
