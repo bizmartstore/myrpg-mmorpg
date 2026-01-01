@@ -416,12 +416,19 @@ io.on('connection', (socket) => {
 
  socket.on('player:changeMap', (data) => {
   if (!currentPlayer) return;
+
   const { map, position } = data;
   const oldMap = currentPlayer.map;
 
   // Remove from old map
-  if (mapPlayers.has(oldMap)) mapPlayers.get(oldMap).delete(currentPlayer.email);
+  if (mapPlayers.has(oldMap)) {
+    mapPlayers.get(oldMap).delete(currentPlayer.email);
+  }
+
   broadcastToMap(oldMap, 'player:left', currentPlayer.email);
+
+  // 🔥 STEP 1: CLEAR ALL MONSTERS ON CLIENT
+  socket.emit('monster:clear');
 
   // Update player state
   currentPlayer.map = map;
@@ -429,53 +436,64 @@ io.on('connection', (socket) => {
   currentPlayer.y = position.y;
 
   // Add to new map
-  if (!mapPlayers.has(map)) mapPlayers.set(map, new Set());
+  if (!mapPlayers.has(map)) {
+    mapPlayers.set(map, new Set());
+  }
   mapPlayers.get(map).add(currentPlayer.email);
 
-  // 🔥🔥🔥 FIX START 🔥🔥🔥
+  // 🔥 STEP 2: SPAWN MONSTERS ONLY IF THIS MAP HAS MONSTERS
+  if (MONSTER_SPAWNS[map]) {
+    spawnMonsters(map);
 
-  // Ensure monsters exist for this map
-  spawnMonsters(map);
-
-  // Send all existing monsters in this map to THIS player
-  const monstersInMap = mapMonsters.get(map) || new Set();
-  for (const monsterId of monstersInMap) {
-    const m = monsters.get(monsterId);
-    if (m && m.hp > 0) {
-      socket.emit('monster:spawn', {
-        id: m.id,
-        type: m.type,
-        x: m.x,
-        y: m.y,
-        hp: m.hp,
-        maxHp: m.maxHp,
-        direction: m.direction,
-        state: m.state,
-        spawnX: m.spawnX,
-        spawnY: m.spawnY,
-        target: m.target
-      });
+    // 🔥 STEP 3: SEND MONSTERS OF THIS MAP TO THIS PLAYER ONLY
+    const monstersInMap = mapMonsters.get(map) || new Set();
+    for (const monsterId of monstersInMap) {
+      const m = monsters.get(monsterId);
+      if (m && m.hp > 0) {
+        socket.emit('monster:spawn', {
+          id: m.id,
+          type: m.type,
+          x: m.x,
+          y: m.y,
+          hp: m.hp,
+          maxHp: m.maxHp,
+          direction: m.direction,
+          state: m.state,
+          spawnX: m.spawnX,
+          spawnY: m.spawnY,
+          target: m.target
+        });
+      }
     }
   }
 
-  // 🔥🔥🔥 FIX END 🔥🔥🔥
-
   // Send nearby players
-  const nearby = getPlayersInAOI(currentPlayer.email, position.x, position.y, map);
+  const nearby = getPlayersInAOI(
+    currentPlayer.email,
+    position.x,
+    position.y,
+    map
+  );
   nearby.forEach(p => socket.emit('player:joined', p));
 
   // Notify others
-  broadcastToAOI(currentPlayer.email, position.x, position.y, map, 'player:joined', {
-    email: currentPlayer.email,
-    name: currentPlayer.name,
-    character_class: currentPlayer.character_class,
-    level: currentPlayer.level,
-    position,
-    direction: currentPlayer.direction,
-    state: currentPlayer.state
-  });
+  broadcastToAOI(
+    currentPlayer.email,
+    position.x,
+    position.y,
+    map,
+    'player:joined',
+    {
+      email: currentPlayer.email,
+      name: currentPlayer.name,
+      character_class: currentPlayer.character_class,
+      level: currentPlayer.level,
+      position,
+      direction: currentPlayer.direction,
+      state: currentPlayer.state
+    }
+  );
 });
-
 
   socket.on('disconnect', () => {
     if (!currentPlayer) return;
