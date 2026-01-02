@@ -40,6 +40,50 @@ const MONSTER_STATS = {
   chonchon: { hp: 55, attack: 7, speed: 2.2, aggro: 200, attackRange: 60, cooldown: 1200, xp: 10, loot: ['potion', 'coin', 'gem'] }
 };
 
+
+// ------------------ MAP DEFINITIONS (SERVER AUTHORITATIVE) ------------------
+const MAPS = {
+  town_1: {
+    id: 'town_1',
+    spawnX: 1200,
+    spawnY: 900,
+    safeZone: true
+  },
+  monster_field_1: {
+    id: 'monster_field_1',
+    spawnX: 400,
+    spawnY: 400,
+    safeZone: false
+  }
+};
+
+// ------------------ PLAYER STAT SCALING (MMORPG FORMULA) ------------------
+function calculatePlayerStats(player) {
+  const { character_class, level } = player;
+
+  // Base stats per class
+  const CLASS_BASE = {
+    assassin: {
+      baseHp: 120,
+      hpPerLevel: 25,
+      baseAttack: 15,
+      attackPerLevel: 4
+    }
+    // you can add more classes here later
+  };
+
+  const cls = CLASS_BASE[character_class] || CLASS_BASE.assassin;
+
+  const maxHp = cls.baseHp + cls.hpPerLevel * (level - 1);
+  const attack = cls.baseAttack + cls.attackPerLevel * (level - 1);
+
+  return {
+    maxHp,
+    attack
+  };
+}
+
+
 // Distance helper
 function getDistance(x1, y1, x2, y2) {
   return Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
