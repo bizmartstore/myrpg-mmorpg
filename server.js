@@ -46,14 +46,29 @@ function calculatePlayerStats(player) {
   return { maxHp, attack };
 }
 
+function calculateDerivedStats(player) {
+  const base = calculatePlayerStats(player);
+  const vitBonus = (player.stats?.VIT || 1) - 1;
+  const strBonus = (player.stats?.STR || 1) - 1;
+
+  const maxHp = base.maxHp + vitBonus * 10;
+  const attack = base.attack + strBonus * 2;
+  const speed = 1 + ((player.stats?.AGI || 1) - 1) * 0.1;
+
+  return { maxHp, attack, speed };
+}
+
 // ================= LEVEL UP & XP =================
 function levelUpPlayer(player) {
   player.level += 1;
-  const stats = calculatePlayerStats(player);
-  player.maxHp = stats.maxHp + (player.stats.VIT - 1) * 10; // extra HP from VIT
-  player.hp = player.maxHp; // heal to full on level-up
-  player.attack = stats.attack + (player.stats.STR - 1) * 2; // extra melee damage from STR
-  player.speed = 1 + (player.stats.AGI - 1) * 0.1; // example speed modifier
+
+  // Calculate derived stats automatically
+  const derived = calculateDerivedStats(player);
+  player.maxHp = derived.maxHp;
+  player.hp = derived.maxHp;    // heal to full on level-up
+  player.attack = derived.attack;
+  player.speed = derived.speed;
+
   player.statPointsAvailable += 5; // new points to distribute
 
   // Notify player client of level-up and available stats
@@ -62,6 +77,7 @@ function levelUpPlayer(player) {
     hp: player.hp,
     maxHp: player.maxHp,
     attack: player.attack,
+    speed: player.speed,
     stats: player.stats,
     statPointsAvailable: player.statPointsAvailable
   });
@@ -493,22 +509,26 @@ socket.on('player:allocateStat', ({ stat, points }) => {
   if (!currentPlayer || currentPlayer.statPointsAvailable < points) return;
   if (!currentPlayer.stats.hasOwnProperty(stat)) return;
 
+  // Allocate points
   currentPlayer.stats[stat] += points;
   currentPlayer.statPointsAvailable -= points;
 
   // Recalculate derived stats
-  const baseStats = calculatePlayerStats(currentPlayer);
-  currentPlayer.maxHp = baseStats.maxHp + (currentPlayer.stats.VIT - 1) * 10;
+  const derived = calculateDerivedStats(currentPlayer);
+  currentPlayer.maxHp = derived.maxHp;
+  // Keep current HP at same proportion of max HP if you want, or heal fully:
   currentPlayer.hp = Math.min(currentPlayer.hp, currentPlayer.maxHp);
-  currentPlayer.attack = baseStats.attack + (currentPlayer.stats.STR - 1) * 2;
-  currentPlayer.speed = 1 + (currentPlayer.stats.AGI - 1) * 0.1;
+  currentPlayer.attack = derived.attack;
+  currentPlayer.speed = derived.speed;
 
+  // Send update to client
   io.to(currentPlayer.socketId).emit('player:statsUpdated', {
     stats: currentPlayer.stats,
     statPointsAvailable: currentPlayer.statPointsAvailable,
     hp: currentPlayer.hp,
     maxHp: currentPlayer.maxHp,
-    attack: currentPlayer.attack
+    attack: currentPlayer.attack,
+    speed: currentPlayer.speed
   });
 });
 
@@ -890,18 +910,21 @@ function handlePlayerDeath(player) {
     y: player.y
   });
 
-  // Revive after 3 seconds with scaled stats
+  // Revive after 3 seconds with derived stats
   setTimeout(() => {
-    const stats = calculatePlayerStats(player);
-    player.maxHp = stats.maxHp;
-    player.hp = stats.maxHp;
-    player.attack = stats.attack;
+    const derived = calculateDerivedStats(player);
+    player.maxHp = derived.maxHp;
+    player.hp = derived.maxHp; // heal to full on respawn
+    player.attack = derived.attack;
+    player.speed = derived.speed;
     player.isDead = false;
     player.state = 'idle';
 
     io.to(player.socketId).emit('player:revived', {
       hp: player.hp,
-      maxHp: player.maxHp
+      maxHp: player.maxHp,
+      attack: player.attack,
+      speed: player.speed
     });
   }, 3000);
 }
@@ -913,9 +936,11 @@ function handlePvPDeath(player) {
 
   // Short respawn timer (e.g., 3 seconds)
   setTimeout(() => {
-    const stats = calculatePlayerStats(player);
-    player.hp = stats.maxHp;
-    player.maxHp = stats.maxHp;
+    const derived = calculateDerivedStats(player); // <-- use new derived stats
+    player.maxHp = derived.maxHp;
+    player.hp = derived.maxHp;   // heal to full
+    player.attack = derived.attack;
+    player.speed = derived.speed;
     player.state = 'idle';
     player.isDead = false;
 
@@ -926,6 +951,8 @@ function handlePvPDeath(player) {
     io.to(player.socketId).emit('player:revived', {
       hp: player.hp,
       maxHp: player.maxHp,
+      attack: player.attack,
+      speed: player.speed,
       x: player.x,
       y: player.y
     });
