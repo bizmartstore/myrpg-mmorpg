@@ -38,6 +38,32 @@ function calculatePlayerStats(player) {
   return { maxHp, attack };
 }
 
+// ================= LEVEL UP & XP =================
+function levelUpPlayer(player) {
+  player.level += 1;
+  const stats = calculatePlayerStats(player);
+  player.maxHp = stats.maxHp;
+  player.hp = stats.maxHp; // heal to full on level-up
+  player.attack = stats.attack;
+
+  // Notify player client
+  io.to(player.socketId).emit('player:levelUp', {
+    level: player.level,
+    hp: player.hp,
+    maxHp: player.maxHp,
+    attack: player.attack
+  });
+}
+
+function giveXp(player, xpAmount) {
+  player.xp += xpAmount;
+  const xpToLevel = player.level * 100; // example formula: 100 XP per level
+  if (player.xp >= xpToLevel) {
+    player.xp -= xpToLevel;
+    levelUpPlayer(player);
+  }
+}
+
 // ================= PLAYER & MAP DATA =================
 const players = new Map();      // email -> player object
 const mapPlayers = new Map();   // mapId -> Set of emails
@@ -438,60 +464,68 @@ io.on('connection', (socket) => {
     });
   });
 
+
   // ------------------ PLAYER ATTACKS MONSTER ------------------
-  socket.on('monster:hit', (data) => {
-    if (!currentPlayer || currentPlayer.isDead) return;
-    const { monsterId, damage } = data;
-    const monster = monsters.get(monsterId);
-    if (!monster || monster.mapId !== currentPlayer.map) return;
+socket.on('monster:hit', (data) => {
+  if (!currentPlayer || currentPlayer.isDead) return;
+  const { monsterId, damage } = data;
+  const monster = monsters.get(monsterId);
+  if (!monster || monster.mapId !== currentPlayer.map) return;
 
-    // Apply damage
-    monster.hp = Math.max(0, monster.hp - damage);
-    monster.lastHitBy = currentPlayer.email;
+  // Apply damage
+  monster.hp = Math.max(0, monster.hp - damage);
+  monster.lastHitBy = currentPlayer.email;
 
-    // Broadcast hit
-    broadcastToMap(monster.mapId, 'monster:hit', {
-      id: monsterId,
-      mapId: monster.mapId,
-      hp: monster.hp,
-      damage
-    });
-
-    if (monster.hp <= 0) {
-      // Monster defeated
-      broadcastToMap(monster.mapId, 'monster:despawn', { id: monsterId, mapId: monster.mapId });
-
-      const killer = players.get(monster.lastHitBy);
-      if (killer) {
-        const stats = MONSTER_STATS[monster.type];
-        killer.xp += stats.xp;
-        const lootItem = stats.loot[Math.floor(Math.random() * stats.loot.length)];
-        killer.inventory.push(lootItem);
-        io.to(killer.socketId).emit('monster:killed', { monsterId, xp: stats.xp, loot: lootItem });
-      }
-
-      // Safe respawn of monster
-      setTimeout(() => {
-        if (!monsters.has(monsterId)) return;
-        monster.hp = monster.maxHp;
-        monster.x = monster.spawnX;
-        monster.y = monster.spawnY;
-        monster.state = 'idle';
-        monster.target = null;
-        broadcastToMap(monster.mapId, 'monster:spawn', {
-          id: monsterId,
-          type: monster.type,
-          mapId: monster.mapId,
-          x: monster.x,
-          y: monster.y,
-          hp: monster.hp,
-          maxHp: monster.maxHp,
-          direction: monster.direction,
-          state: monster.state
-        });
-      }, 5000);
-    }
+  // Broadcast hit
+  broadcastToMap(monster.mapId, 'monster:hit', {
+    id: monsterId,
+    mapId: monster.mapId,
+    hp: monster.hp,
+    damage
   });
+
+  if (monster.hp <= 0) {
+    // Monster defeated
+    broadcastToMap(monster.mapId, 'monster:despawn', { id: monsterId, mapId: monster.mapId });
+
+    const killer = players.get(monster.lastHitBy);
+    if (killer) {
+      const stats = MONSTER_STATS[monster.type];
+
+      // ---- GIVE XP AND HANDLE LEVEL-UP ----
+      giveXp(killer, stats.xp);
+
+      // Give loot
+      const lootItem = stats.loot[Math.floor(Math.random() * stats.loot.length)];
+      killer.inventory.push(lootItem);
+
+      // Notify player of kill and loot
+      io.to(killer.socketId).emit('monster:killed', { monsterId, loot: lootItem });
+    }
+
+    // Safe respawn of monster
+    setTimeout(() => {
+      if (!monsters.has(monsterId)) return;
+      monster.hp = monster.maxHp;
+      monster.x = monster.spawnX;
+      monster.y = monster.spawnY;
+      monster.state = 'idle';
+      monster.target = null;
+      broadcastToMap(monster.mapId, 'monster:spawn', {
+        id: monsterId,
+        type: monster.type,
+        mapId: monster.mapId,
+        x: monster.x,
+        y: monster.y,
+        hp: monster.hp,
+        maxHp: monster.maxHp,
+        direction: monster.direction,
+        state: monster.state
+      });
+    }, 5000);
+  }
+});
+
 
 
 
