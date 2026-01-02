@@ -189,7 +189,7 @@ function updateMonsterAI() {
     // ❌ Skip dead monsters
     if (monster.hp <= 0) continue;
 
-    // 🔥 NEW: Skip AI if map has no players
+    // ❌ Skip AI if map has no players
     const playersInMap = mapPlayers.get(monster.mapId);
     if (!playersInMap || playersInMap.size === 0) continue;
 
@@ -198,7 +198,7 @@ function updateMonsterAI() {
 
     for (const email of playersInMap) {
       const p = players.get(email);
-      if (!p) continue;
+      if (!p || p.isDead) continue; // 🔥 skip dead players
 
       const dist = getDistance(monster.x, monster.y, p.x, p.y);
       if (dist < closestDist && dist < monster.aggroRange) {
@@ -240,7 +240,7 @@ function updateMonsterAI() {
           monster.lastUpdate = now;
         }
 
-      // ------------------ ATTACK ------------------
+      // ------------------ ATTACK (UPDATED) ------------------
       } else {
         if (now - monster.lastAttack > monster.attackCooldown) {
           monster.state = 'attacking';
@@ -255,6 +255,23 @@ function updateMonsterAI() {
             y: monster.y,
             direction: monster.direction
           });
+
+          // 🔥 SERVER-SIDE DAMAGE AUTHORITY
+          const targetPlayer = players.get(closestPlayer.email);
+          if (!targetPlayer || targetPlayer.isDead) continue;
+
+          targetPlayer.hp -= monster.attack;
+          targetPlayer.hp = Math.max(0, targetPlayer.hp);
+
+          io.to(targetPlayer.socketId).emit('player:damaged', {
+            hp: targetPlayer.hp,
+            maxHp: targetPlayer.maxHp,
+            damage: monster.attack
+          });
+
+          if (targetPlayer.hp === 0) {
+            handlePlayerDeath(targetPlayer);
+          }
 
           setTimeout(() => {
             monster.state = 'idle';
@@ -348,46 +365,91 @@ io.on('connection', (socket) => {
   let currentPlayer = null;
 
   socket.on('player:join', (data) => {
-    const { email, name, character_class, level, position, map } = data;
-    currentPlayer = { email, name, character_class, level, x: position.x, y: position.y, direction: 'front', state: 'idle', map, socketId: socket.id, lastUpdate: Date.now(), xp: 0, inventory: [] };
-    players.set(email, currentPlayer);
+  const { email, name, character_class, level, position, map } = data;
 
-    if (!mapPlayers.has(map)) mapPlayers.set(map, new Set());
-    mapPlayers.get(map).add(email);
-
-    console.log(`Player ${name} joined map ${map}`);
-
-    spawnMonsters(map);
-
-    // Send existing monsters
-    const monstersInMap = mapMonsters.get(map) || new Set();
-    for (const monsterId of monstersInMap) {
-      const m = monsters.get(monsterId);
-      if (m && m.hp > 0) {
-        socket.emit('monster:spawn', { 
-          id: m.id,
-          type: m.type,
-	  mapId: m.mapId,
-          x: m.x,
-          y: m.y,
-          hp: m.hp,
-          maxHp: m.maxHp,
-          direction: m.direction,
-          state: m.state,
-          spawnX: m.spawnX,
-          spawnY: m.spawnY,
-          target: m.target
-        });
-      }
-    }
-
-    const nearby = getPlayersInAOI(email, position.x, position.y, map);
-    nearby.forEach(p => socket.emit('player:joined', p));
-
-    broadcastToAOI(email, position.x, position.y, map, 'player:joined', { 
-      email, name, character_class, level, position, direction: 'front', state: 'idle' 
-    });
+  // 🔥 Calculate dynamic stats (MMORPG-style)
+  const stats = calculatePlayerStats({
+    character_class,
+    level
   });
+
+  currentPlayer = {
+    email,
+    name,
+    character_class,
+    level,
+
+    // Position
+    x: position.x,
+    y: position.y,
+
+    // State
+    direction: 'front',
+    state: 'idle',
+    map,
+    socketId: socket.id,
+    lastUpdate: Date.now(),
+
+    // 🔥 Dynamic combat stats
+    hp: stats.maxHp,
+    maxHp: stats.maxHp,
+    attack: stats.attack,
+    isDead: false,
+
+    // Progression
+    xp: 0,
+    inventory: []
+  };
+
+  players.set(email, currentPlayer);
+
+  // ------------------ MAP REGISTRATION ------------------
+  if (!mapPlayers.has(map)) mapPlayers.set(map, new Set());
+  mapPlayers.get(map).add(email);
+
+  console.log(`Player ${name} joined map ${map}`);
+
+  // ------------------ MONSTERS ------------------
+  spawnMonsters(map);
+
+  // Send existing monsters to this player
+  const monstersInMap = mapMonsters.get(map) || new Set();
+  for (const monsterId of monstersInMap) {
+    const m = monsters.get(monsterId);
+    if (m && m.hp > 0) {
+      socket.emit('monster:spawn', { 
+        id: m.id,
+        type: m.type,
+        mapId: m.mapId,
+        x: m.x,
+        y: m.y,
+        hp: m.hp,
+        maxHp: m.maxHp,
+        direction: m.direction,
+        state: m.state,
+        spawnX: m.spawnX,
+        spawnY: m.spawnY,
+        target: m.target
+      });
+    }
+  }
+
+  // ------------------ NEARBY PLAYERS ------------------
+  const nearby = getPlayersInAOI(email, position.x, position.y, map);
+  nearby.forEach(p => socket.emit('player:joined', p));
+
+  // Notify others in AOI
+  broadcastToAOI(email, position.x, position.y, map, 'player:joined', { 
+    email,
+    name,
+    character_class,
+    level,
+    position,
+    direction: 'front',
+    state: 'idle'
+  });
+});
+
 
   // ------------------ Player Attacks Monster (FIXED & SAFE) ------------------
 socket.on('monster:hit', (data) => {
@@ -641,6 +703,54 @@ socket.on('disconnect', () => {
   players.delete(currentPlayer.email);
 });
 });
+
+
+function handlePlayerDeath(player) {
+  if (player.isDead) return;
+
+  player.isDead = true;
+  player.state = 'dead';
+
+  const townMap = 'town_1';
+
+  // remove from current map
+  if (mapPlayers.has(player.map)) {
+    mapPlayers.get(player.map).delete(player.email);
+  }
+
+  // move to town
+  player.map = townMap;
+  player.x = MAPS[townMap].spawnX;
+  player.y = MAPS[townMap].spawnY;
+
+  if (!mapPlayers.has(townMap)) {
+    mapPlayers.set(townMap, new Set());
+  }
+  mapPlayers.get(townMap).add(player.email);
+
+  io.to(player.socketId).emit('player:died', {
+    map: townMap,
+    x: player.x,
+    y: player.y
+  });
+
+  // revive (scaled)
+  setTimeout(() => {
+    const stats = calculatePlayerStats(player);
+
+    player.maxHp = stats.maxHp;
+    player.hp = stats.maxHp;
+    player.attack = stats.attack;
+    player.isDead = false;
+    player.state = 'idle';
+
+    io.to(player.socketId).emit('player:revived', {
+      hp: player.hp,
+      maxHp: player.maxHp
+    });
+  }, 3000);
+}
+
 
 
 // Start server
