@@ -21,6 +21,16 @@ const MAPS = {
   monster_field_1: { id: 'monster_field_1', spawnX: 400, spawnY: 400, safeZone: false }
 };
 
+ // ------------------ PvP Arena ------------------
+  pvp_arena: {
+    id: 'pvp_arena',
+    spawnX: 500,
+    spawnY: 500,
+    safeZone: false,
+    minLevel: 10 // only level 10+ players can enter
+  }
+};
+
 // ================= PLAYER STAT SCALING (MMORPG FORMULA) =================
 function calculatePlayerStats(player) {
   const { character_class, level } = player;
@@ -42,18 +52,23 @@ function calculatePlayerStats(player) {
 function levelUpPlayer(player) {
   player.level += 1;
   const stats = calculatePlayerStats(player);
-  player.maxHp = stats.maxHp;
-  player.hp = stats.maxHp; // heal to full on level-up
-  player.attack = stats.attack;
+  player.maxHp = stats.maxHp + (player.stats.VIT - 1) * 10; // extra HP from VIT
+  player.hp = player.maxHp; // heal to full on level-up
+  player.attack = stats.attack + (player.stats.STR - 1) * 2; // extra melee damage from STR
+  player.speed = 1 + (player.stats.AGI - 1) * 0.1; // example speed modifier
+  player.statPointsAvailable += 5; // new points to distribute
 
-  // Notify player client
+  // Notify player client of level-up and available stats
   io.to(player.socketId).emit('player:levelUp', {
     level: player.level,
     hp: player.hp,
     maxHp: player.maxHp,
-    attack: player.attack
+    attack: player.attack,
+    stats: player.stats,
+    statPointsAvailable: player.statPointsAvailable
   });
 }
+
 
 function giveXp(player, xpAmount) {
   player.xp += xpAmount;
@@ -389,80 +404,124 @@ io.on('connection', (socket) => {
   let currentPlayer = null;
 
   // ------------------ PLAYER JOIN ------------------
-  socket.on('player:join', (data) => {
-    const { email, name, character_class, level, position, map } = data;
+socket.on('player:join', (data) => {
+  const { email, name, character_class, level, position, map } = data;
 
-    // Calculate dynamic stats (MMORPG-style)
-    const stats = calculatePlayerStats({ character_class, level });
+  // Calculate dynamic stats (MMORPG-style)
+  const stats = calculatePlayerStats({ character_class, level });
 
-    currentPlayer = {
-      email,
-      name,
-      character_class,
-      level,
-      x: position.x,
-      y: position.y,
-      direction: 'front',
-      state: 'idle',
-      map,
-      socketId: socket.id,
-      lastUpdate: Date.now(),
-      hp: stats.maxHp,
-      maxHp: stats.maxHp,
-      attack: stats.attack,
-      isDead: false,
-      xp: 0,
-      inventory: []
-    };
+  currentPlayer = {
+    email,
+    name,
+    character_class,
+    level,
+    x: position.x,
+    y: position.y,
+    direction: 'front',
+    state: 'idle',
+    map,
+    socketId: socket.id,
+    lastUpdate: Date.now(),
+    hp: stats.maxHp,
+    maxHp: stats.maxHp,
+    attack: stats.attack,
+    isDead: false,
+    xp: 0,
+    inventory: [],
 
-    players.set(email, currentPlayer);
-
-    // ------------------ MAP REGISTRATION ------------------
-    if (!mapPlayers.has(map)) mapPlayers.set(map, new Set());
-    mapPlayers.get(map).add(email);
-
-    console.log(`Player ${name} joined map ${map}`);
-
-    // ------------------ MONSTERS ------------------
-    spawnMonsters(map);
-
-    // Send existing monsters to this player
-    const monstersInMap = mapMonsters.get(map) || new Set();
-    for (const monsterId of monstersInMap) {
-      const m = monsters.get(monsterId);
-      if (m && m.hp > 0) {
-        socket.emit('monster:spawn', { 
-          id: m.id,
-          type: m.type,
-          mapId: m.mapId,
-          x: m.x,
-          y: m.y,
-          hp: m.hp,
-          maxHp: m.maxHp,
-          direction: m.direction,
-          state: m.state,
-          spawnX: m.spawnX,
-          spawnY: m.spawnY,
-          target: m.target
-        });
-      }
+    // ------------------ STAT DISTRIBUTION ------------------
+    statPointsAvailable: 5 * level, // 5 points per current level
+    stats: {
+      STR: 1,  // Melee Damage
+      AGI: 1,  // Speed & Attack Speed
+      VIT: 1,  // HP Increase
+      INT: 1,  // Mana & Magic Damage
+      DEX: 1,  // Accuracy
+      LUCK: 1  // Critical Chance
     }
+  };
 
-    // ------------------ NEARBY PLAYERS ------------------
-    const nearby = getPlayersInAOI(email, position.x, position.y, map);
-    nearby.forEach(p => socket.emit('player:joined', p));
+  players.set(email, currentPlayer);
 
-    // Notify others in AOI
-    broadcastToAOI(email, position.x, position.y, map, 'player:joined', { 
-      email,
-      name,
-      character_class,
-      level,
-      position,
-      direction: 'front',
-      state: 'idle'
-    });
+  // ------------------ MAP REGISTRATION ------------------
+  if (!mapPlayers.has(map)) mapPlayers.set(map, new Set());
+  mapPlayers.get(map).add(email);
+
+  console.log(`Player ${name} joined map ${map}`);
+
+  // ------------------ MONSTERS ------------------
+  spawnMonsters(map);
+
+  // Send existing monsters to this player
+  const monstersInMap = mapMonsters.get(map) || new Set();
+  for (const monsterId of monstersInMap) {
+    const m = monsters.get(monsterId);
+    if (m && m.hp > 0) {
+      socket.emit('monster:spawn', { 
+        id: m.id,
+        type: m.type,
+        mapId: m.mapId,
+        x: m.x,
+        y: m.y,
+        hp: m.hp,
+        maxHp: m.maxHp,
+        direction: m.direction,
+        state: m.state,
+        spawnX: m.spawnX,
+        spawnY: m.spawnY,
+        target: m.target
+      });
+    }
+  }
+
+  // ------------------ NEARBY PLAYERS ------------------
+  const nearby = getPlayersInAOI(email, position.x, position.y, map);
+  nearby.forEach(p => socket.emit('player:joined', p));
+
+  // Notify others in AOI
+  broadcastToAOI(email, position.x, position.y, map, 'player:joined', { 
+    email,
+    name,
+    character_class,
+    level,
+    position,
+    direction: 'front',
+    state: 'idle',
+    stats: currentPlayer.stats,
+    statPointsAvailable: currentPlayer.statPointsAvailable
   });
+
+  // Also notify this player of their own stats for UI
+  socket.emit('player:statsInitialized', {
+    stats: currentPlayer.stats,
+    statPointsAvailable: currentPlayer.statPointsAvailable
+  });
+});
+
+socket.on('player:allocateStat', ({ stat, points }) => {
+  if (!currentPlayer || currentPlayer.statPointsAvailable < points) return;
+  if (!currentPlayer.stats.hasOwnProperty(stat)) return;
+
+  currentPlayer.stats[stat] += points;
+  currentPlayer.statPointsAvailable -= points;
+
+  // Recalculate derived stats
+  const baseStats = calculatePlayerStats(currentPlayer);
+  currentPlayer.maxHp = baseStats.maxHp + (currentPlayer.stats.VIT - 1) * 10;
+  currentPlayer.hp = Math.min(currentPlayer.hp, currentPlayer.maxHp);
+  currentPlayer.attack = baseStats.attack + (currentPlayer.stats.STR - 1) * 2;
+  currentPlayer.speed = 1 + (currentPlayer.stats.AGI - 1) * 0.1;
+
+  io.to(currentPlayer.socketId).emit('player:statsUpdated', {
+    stats: currentPlayer.stats,
+    statPointsAvailable: currentPlayer.statPointsAvailable,
+    hp: currentPlayer.hp,
+    maxHp: currentPlayer.maxHp,
+    attack: currentPlayer.attack
+  });
+});
+
+
 
 
   // ------------------ PLAYER ATTACKS MONSTER ------------------
@@ -567,6 +626,16 @@ socket.on('player:hit', (data) => {
   if (!currentPlayer || currentPlayer.isDead) return;
 
   const { damage, attackerEmail } = data; // attackerEmail can be player or monster
+  const attacker = attackerEmail ? players.get(attackerEmail) : null;
+
+  // PvP enforcement: allow only in PvP maps
+  if (attacker && currentPlayer.map !== 'pvp_arena') {
+    // Ignore PvP damage outside PvP map
+    io.to(currentPlayer.socketId).emit('player:hitDenied', {
+      message: 'You cannot attack other players outside the PvP arena.'
+    });
+    return;
+  }
 
   // Reduce HP safely
   currentPlayer.hp = Math.max(0, currentPlayer.hp - damage);
@@ -595,7 +664,23 @@ socket.on('player:hit', (data) => {
 
   // Check for death
   if (currentPlayer.hp <= 0) {
-    handlePlayerDeath(currentPlayer);
+    // PvP death logic: respawn in PvP arena at spawn point
+    if (currentPlayer.map === 'pvp_arena') {
+      currentPlayer.hp = currentPlayer.maxHp;
+      currentPlayer.x = MAPS.pvp_arena.spawnX;
+      currentPlayer.y = MAPS.pvp_arena.spawnY;
+
+      io.to(currentPlayer.socketId).emit('player:revived', {
+        hp: currentPlayer.hp,
+        maxHp: currentPlayer.maxHp,
+        map: 'pvp_arena',
+        x: currentPlayer.x,
+        y: currentPlayer.y
+      });
+    } else {
+      // Normal death handling
+      handlePlayerDeath(currentPlayer);
+    }
   }
 });
 
@@ -621,67 +706,87 @@ socket.on('player:hit', (data) => {
   });
 
   // ------------------ CHANGE MAP ------------------
-  socket.on('player:changeMap', (data) => {
-    if (!currentPlayer) return;
-    const { map, position } = data;
-    const oldMap = currentPlayer.map;
+socket.on('player:changeMap', (data) => {
+  if (!currentPlayer) return;
+  const { map, position } = data;
+  const oldMap = currentPlayer.map;
 
-    if (mapPlayers.has(oldMap)) {
-      mapPlayers.get(oldMap).delete(currentPlayer.email);
-      broadcastToMap(oldMap, 'player:left', currentPlayer.email);
-      cleanupMapIfEmpty(oldMap);
+  // Check if map exists
+  const targetMap = MAPS[map];
+  if (!targetMap) {
+    io.to(currentPlayer.socketId).emit('player:mapError', { message: 'Map does not exist.' });
+    return;
+  }
+
+  // Enforce minLevel if defined
+  if (targetMap.minLevel && currentPlayer.level < targetMap.minLevel) {
+    io.to(currentPlayer.socketId).emit('player:mapError', { 
+      message: `You need to be level ${targetMap.minLevel}+ to enter this map.` 
+    });
+    return;
+  }
+
+  // Remove from old map
+  if (mapPlayers.has(oldMap)) {
+    mapPlayers.get(oldMap).delete(currentPlayer.email);
+    broadcastToMap(oldMap, 'player:left', currentPlayer.email);
+    cleanupMapIfEmpty(oldMap);
+  }
+
+  // Update current player
+  currentPlayer.map = map;
+  currentPlayer.x = position.x;
+  currentPlayer.y = position.y;
+
+  if (!mapPlayers.has(map)) mapPlayers.set(map, new Set());
+  mapPlayers.get(map).add(currentPlayer.email);
+
+  // Spawn monsters if applicable
+  spawnMonsters(map);
+
+  const monstersInMap = mapMonsters.get(map) || new Set();
+  for (const monsterId of monstersInMap) {
+    const m = monsters.get(monsterId);
+    if (m && m.hp > 0) {
+      socket.emit('monster:spawn', {
+        id: m.id,
+        type: m.type,
+        mapId: m.mapId,
+        x: m.x,
+        y: m.y,
+        hp: m.hp,
+        maxHp: m.maxHp,
+        direction: m.direction,
+        state: m.state,
+        spawnX: m.spawnX,
+        spawnY: m.spawnY,
+        target: m.target
+      });
     }
+  }
 
-    currentPlayer.map = map;
-    currentPlayer.x = position.x;
-    currentPlayer.y = position.y;
+  // Notify nearby players
+  const nearby = getPlayersInAOI(currentPlayer.email, position.x, position.y, map);
+  nearby.forEach(p => socket.emit('player:joined', p));
 
-    if (!mapPlayers.has(map)) mapPlayers.set(map, new Set());
-    mapPlayers.get(map).add(currentPlayer.email);
-
-    spawnMonsters(map);
-
-    const monstersInMap = mapMonsters.get(map) || new Set();
-    for (const monsterId of monstersInMap) {
-      const m = monsters.get(monsterId);
-      if (m && m.hp > 0) {
-        socket.emit('monster:spawn', {
-          id: m.id,
-          type: m.type,
-          mapId: m.mapId,
-          x: m.x,
-          y: m.y,
-          hp: m.hp,
-          maxHp: m.maxHp,
-          direction: m.direction,
-          state: m.state,
-          spawnX: m.spawnX,
-          spawnY: m.spawnY,
-          target: m.target
-        });
-      }
+  broadcastToAOI(
+    currentPlayer.email,
+    position.x,
+    position.y,
+    map,
+    'player:joined',
+    {
+      email: currentPlayer.email,
+      name: currentPlayer.name,
+      character_class: currentPlayer.character_class,
+      level: currentPlayer.level,
+      position,
+      direction: currentPlayer.direction,
+      state: currentPlayer.state
     }
+  );
+});
 
-    const nearby = getPlayersInAOI(currentPlayer.email, position.x, position.y, map);
-    nearby.forEach(p => socket.emit('player:joined', p));
-
-    broadcastToAOI(
-      currentPlayer.email,
-      position.x,
-      position.y,
-      map,
-      'player:joined',
-      {
-        email: currentPlayer.email,
-        name: currentPlayer.name,
-        character_class: currentPlayer.character_class,
-        level: currentPlayer.level,
-        position,
-        direction: currentPlayer.direction,
-        state: currentPlayer.state
-      }
-    );
-  });
 
  // ------------------ DISCONNECT ------------------
   socket.on('disconnect', () => {
