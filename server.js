@@ -18,11 +18,8 @@ const AOI_RADIUS = 800; // pixels
 // ================= MAP DEFINITIONS (SERVER AUTHORITATIVE) =================
 const MAPS = {
   town_1: { id: 'town_1', spawnX: 1200, spawnY: 900, safeZone: true },
-  monster_field_1: { id: 'monster_field_1', spawnX: 400, spawnY: 400, safeZone: false }
-};
-
- // ------------------ PvP Arena ------------------
-  pvp_arena: {
+  monster_field_1: { id: 'monster_field_1', spawnX: 400, spawnY: 400, safeZone: false },
+  pvp_arena: { 
     id: 'pvp_arena',
     spawnX: 500,
     spawnY: 500,
@@ -30,6 +27,7 @@ const MAPS = {
     minLevel: 10 // only level 10+ players can enter
   }
 };
+
 
 // ================= PLAYER STAT SCALING (MMORPG FORMULA) =================
 function calculatePlayerStats(player) {
@@ -411,35 +409,28 @@ socket.on('player:join', (data) => {
   const stats = calculatePlayerStats({ character_class, level });
 
   currentPlayer = {
-    email,
-    name,
-    character_class,
-    level,
-    x: position.x,
-    y: position.y,
-    direction: 'front',
-    state: 'idle',
-    map,
-    socketId: socket.id,
-    lastUpdate: Date.now(),
-    hp: stats.maxHp,
-    maxHp: stats.maxHp,
-    attack: stats.attack,
-    isDead: false,
-    xp: 0,
-    inventory: [],
+  email,
+  name,
+  character_class,
+  level,
+  x: position.x,
+  y: position.y,
+  direction: 'front',
+  state: 'idle',
+  map,
+  socketId: socket.id,
+  lastUpdate: Date.now(),
+  hp: stats.maxHp,
+  maxHp: stats.maxHp,
+  attack: stats.attack,
+  isDead: false,
+  xp: 0,
+  inventory: [],
+  statsPoints: 5, // available points for allocation per level
+  stats: { STR: 1, AGI: 1, VIT: 1, INT: 1, DEX: 1, LUCK: 1 },
+  lastAttackTime: 0 // cooldown tracker
+};
 
-    // ------------------ STAT DISTRIBUTION ------------------
-    statPointsAvailable: 5 * level, // 5 points per current level
-    stats: {
-      STR: 1,  // Melee Damage
-      AGI: 1,  // Speed & Attack Speed
-      VIT: 1,  // HP Increase
-      INT: 1,  // Mana & Magic Damage
-      DEX: 1,  // Accuracy
-      LUCK: 1  // Critical Chance
-    }
-  };
 
   players.set(email, currentPlayer);
 
@@ -520,6 +511,66 @@ socket.on('player:allocateStat', ({ stat, points }) => {
     attack: currentPlayer.attack
   });
 });
+
+// ------------------ PvP ATTACK ------------------
+socket.on('player:pvpAttack', (data) => {
+  if (!currentPlayer || currentPlayer.isDead) return;
+
+  const { targetEmail } = data;
+  const now = Date.now();
+  const COOLDOWN = 1000; // 1 second per attack
+
+  if (now - currentPlayer.lastAttackTime < COOLDOWN) return; // still on cooldown
+  currentPlayer.lastAttackTime = now;
+
+  const target = players.get(targetEmail);
+  if (!target || target.isDead) return;
+  
+  // Only allow PvP in pvp_arena
+  if (currentPlayer.map !== 'pvp_arena' || target.map !== 'pvp_arena') return;
+
+  // ------------------ Calculate damage ------------------
+  let damage = currentPlayer.attack;
+
+  // STR increases damage
+  damage += currentPlayer.stats.STR * 2;
+
+  // LUCK for crits (double damage)
+  if (Math.random() < currentPlayer.stats.LUCK * 0.05) {
+    damage *= 2;
+  }
+
+  // Apply damage to target
+  target.hp = Math.max(0, target.hp - damage);
+
+  // Notify attacker
+  io.to(currentPlayer.socketId).emit('player:attackResult', {
+    target: targetEmail,
+    damage,
+    targetHp: target.hp
+  });
+
+  // Notify target
+  io.to(target.socketId).emit('player:hpChanged', {
+    hp: target.hp,
+    maxHp: target.maxHp,
+    damage,
+    attacker: currentPlayer.email
+  });
+
+  // Optional: notify nearby players via AOI (throttle if needed)
+  // broadcastToAOI(currentPlayer.email, currentPlayer.x, currentPlayer.y, currentPlayer.map, 'player:pvpHit', {
+  //   attacker: currentPlayer.email,
+  //   target: targetEmail,
+  //   damage
+  // });
+
+  // ------------------ Check death & respawn ------------------
+  if (target.hp <= 0) {
+    handlePvPDeath(target);
+  }
+});
+
 
 
 
@@ -854,6 +905,33 @@ function handlePlayerDeath(player) {
     });
   }, 3000);
 }
+
+function handlePvPDeath(player) {
+  if (player.isDead) return;
+  player.isDead = true;
+  player.state = 'dead';
+
+  // Short respawn timer (e.g., 3 seconds)
+  setTimeout(() => {
+    const stats = calculatePlayerStats(player);
+    player.hp = stats.maxHp;
+    player.maxHp = stats.maxHp;
+    player.state = 'idle';
+    player.isDead = false;
+
+    // Respawn at PvP spawn
+    player.x = MAPS.pvp_arena.spawnX;
+    player.y = MAPS.pvp_arena.spawnY;
+
+    io.to(player.socketId).emit('player:revived', {
+      hp: player.hp,
+      maxHp: player.maxHp,
+      x: player.x,
+      y: player.y
+    });
+  }, 3000);
+}
+
 
 
 // Start server
