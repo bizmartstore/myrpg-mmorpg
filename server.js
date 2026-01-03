@@ -431,7 +431,7 @@ io.on('connection', (socket) => {
 
   // ------------------ PLAYER JOIN ------------------
 socket.on('player:join', (data) => {
-  const { email, name, character_class, level, position, map } = data;
+  const { email, name, character_class, level, xp, position, map } = data;
 
   // Calculate dynamic stats (MMORPG-style)
   const stats = calculatePlayerStats({ character_class, level });
@@ -452,7 +452,7 @@ socket.on('player:join', (data) => {
   maxHp: stats.maxHp,
   attack: stats.attack,
   isDead: false,
-  xp: 0,
+  xp: xp ?? 0,
   inventory: [],
   statPointsAvailable: 5, // available points for allocation per level
   stats: { STR: 1, AGI: 1, VIT: 1, INT: 1, DEX: 1, LUCK: 1 },
@@ -516,6 +516,13 @@ socket.on('player:join', (data) => {
     statPointsAvailable: currentPlayer.statPointsAvailable
   });
 });
+
+socket.emit('player:xpUpdated', {
+  xp: currentPlayer.xp,
+  level: currentPlayer.level,
+  xpToLevel: currentPlayer.level * 100
+});
+
 
 socket.on('player:allocateStat', ({ stat, points }) => {
   if (!currentPlayer || currentPlayer.statPointsAvailable < points) return;
