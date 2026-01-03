@@ -86,12 +86,24 @@ function levelUpPlayer(player) {
 
 function giveXp(player, xpAmount) {
   player.xp += xpAmount;
-  const xpToLevel = player.level * 100; // example formula: 100 XP per level
-  if (player.xp >= xpToLevel) {
+
+  let xpToLevel = player.level * 100;
+
+  // Allow MULTIPLE level-ups
+  while (player.xp >= xpToLevel) {
     player.xp -= xpToLevel;
     levelUpPlayer(player);
+    xpToLevel = player.level * 100;
   }
+
+  // Always sync XP to client (EXP BAR FIX)
+  io.to(player.socketId).emit('player:xpUpdated', {
+    xp: player.xp,
+    level: player.level,
+    xpToLevel
+  });
 }
+
 
 // ================= PLAYER & MAP DATA =================
 const players = new Map();      // email -> player object
@@ -442,7 +454,7 @@ socket.on('player:join', (data) => {
   isDead: false,
   xp: 0,
   inventory: [],
-  statsPoints: 5, // available points for allocation per level
+  statPointsAvailable: 5, // available points for allocation per level
   stats: { STR: 1, AGI: 1, VIT: 1, INT: 1, DEX: 1, LUCK: 1 },
   lastAttackTime: 0 // cooldown tracker
 };
@@ -598,15 +610,16 @@ socket.on('player:pvpAttack', (data) => {
   // ------------------ PLAYER ATTACKS MONSTER ------------------
 socket.on('monster:hit', (data) => {
   if (!currentPlayer || currentPlayer.isDead) return;
+
   const { monsterId, damage } = data;
   const monster = monsters.get(monsterId);
-  if (!monster || monster.mapId !== currentPlayer.map) return;
+  if (!monster || monster.mapId !== currentPlayer.map || monster.hp <= 0) return;
 
-  // Apply damage
+  // ---- APPLY DAMAGE (SERVER AUTHORITATIVE) ----
   monster.hp = Math.max(0, monster.hp - damage);
   monster.lastHitBy = currentPlayer.email;
 
-  // Broadcast hit
+  // ---- BROADCAST HIT ----
   broadcastToMap(monster.mapId, 'monster:hit', {
     id: monsterId,
     mapId: monster.mapId,
@@ -614,35 +627,67 @@ socket.on('monster:hit', (data) => {
     damage
   });
 
+  // ------------------ MONSTER DEAD ------------------
   if (monster.hp <= 0) {
-    // Monster defeated
-    broadcastToMap(monster.mapId, 'monster:despawn', { id: monsterId, mapId: monster.mapId });
+    broadcastToMap(monster.mapId, 'monster:despawn', {
+      id: monsterId,
+      mapId: monster.mapId
+    });
 
     const killer = players.get(monster.lastHitBy);
     if (killer) {
       const stats = MONSTER_STATS[monster.type];
 
-      // ---- GIVE XP AND HANDLE LEVEL-UP ----
+      // ---------- GIVE XP ----------
       giveXp(killer, stats.xp);
 
-      // Give loot
+      // ---------- GIVE BCOINS ----------
+      const bcoinsAmount = Math.floor(Math.random() * 21) + 10; // 10–30
+
+      // ---------- GIVE LOOT ----------
       const lootItem = stats.loot[Math.floor(Math.random() * stats.loot.length)];
       killer.inventory.push(lootItem);
 
-      // Notify player of kill and loot
-      io.to(killer.socketId).emit('monster:killed', { monsterId, loot: lootItem });
+      // ---------- SPAWN DROP ----------
+      const dropId = `drop_${Date.now()}_${Math.random()}`;
+      const drop = {
+        id: dropId,
+        x: monster.x,
+        y: monster.y,
+        type: Math.random() > 0.3 ? 'bcoins' : 'item',
+        amount: bcoinsAmount,
+        itemName: lootItem,
+        mapId: monster.mapId
+      };
+
+      broadcastToMap(monster.mapId, 'drop:spawn', drop);
+
+      // ---------- NOTIFY KILLER (EXP BAR FIX) ----------
+      io.to(killer.socketId).emit('monster:killed', {
+        monsterId,
+        xp: stats.xp,
+        currentXp: killer.xp,
+        level: killer.level,
+        bcoins: bcoinsAmount,
+        loot: {
+          id: lootItem,
+          name: lootItem
+        }
+      });
     }
 
-    // Safe respawn of monster
+    // ---------- SAFE RESPAWN ----------
     setTimeout(() => {
       if (!monsters.has(monsterId)) return;
+
       monster.hp = monster.maxHp;
       monster.x = monster.spawnX;
       monster.y = monster.spawnY;
       monster.state = 'idle';
       monster.target = null;
+
       broadcastToMap(monster.mapId, 'monster:spawn', {
-        id: monsterId,
+        id: monster.id,
         type: monster.type,
         mapId: monster.mapId,
         x: monster.x,
@@ -655,8 +700,6 @@ socket.on('monster:hit', (data) => {
     }, 5000);
   }
 });
-
-
 
 
 // ------------------ PLAYER MOVEMENT ------------------
@@ -775,6 +818,14 @@ socket.on('player:hit', (data) => {
       }
     );
   });
+
+// ------------------ DROP PICKUP ------------------
+socket.on('drop:pickup', ({ dropId }) => {
+  if (!currentPlayer) return;
+
+  broadcastToMap(currentPlayer.map, 'drop:pickup', { dropId });
+});
+
 
   // ------------------ CHANGE MAP ------------------
 socket.on('player:changeMap', (data) => {
