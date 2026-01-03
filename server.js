@@ -429,36 +429,95 @@ io.on('connection', (socket) => {
   console.log('Player connected:', socket.id);
   let currentPlayer = null;
 
-  // ------------------ PLAYER JOIN ------------------
+ // ------------------ PLAYER JOIN ------------------
 socket.on('player:join', (data) => {
   const { email, name, character_class, level, xp, position, map } = data;
 
-  // Calculate dynamic stats (MMORPG-style)
-  const stats = calculatePlayerStats({ character_class, level });
+  // ================= REJOIN / RECONNECT GUARD =================
+  if (players.has(email)) {
+    currentPlayer = players.get(email);
+
+    // Update socket & live data
+    currentPlayer.socketId = socket.id;
+    currentPlayer.x = position.x;
+    currentPlayer.y = position.y;
+    currentPlayer.map = map;
+    currentPlayer.lastUpdate = Date.now();
+
+    // Ensure map registration
+    if (!mapPlayers.has(map)) mapPlayers.set(map, new Set());
+    mapPlayers.get(map).add(email);
+
+    console.log(`🔁 Player ${email} rejoined map ${map} with XP ${currentPlayer.xp}`);
+
+    // ------------------ RESYNC XP ------------------
+    socket.emit('player:xpUpdated', {
+      xp: currentPlayer.xp,
+      level: currentPlayer.level,
+      xpToLevel: currentPlayer.level * 100
+    });
+
+    // ------------------ RESYNC STATS ------------------
+    socket.emit('player:statsInitialized', {
+      stats: currentPlayer.stats,
+      statPointsAvailable: currentPlayer.statPointsAvailable
+    });
+
+    // ------------------ MONSTERS ------------------
+    spawnMonsters(map);
+    const monstersInMap = mapMonsters.get(map) || new Set();
+    for (const monsterId of monstersInMap) {
+      const m = monsters.get(monsterId);
+      if (m && m.hp > 0) {
+        socket.emit('monster:spawn', {
+          id: m.id,
+          type: m.type,
+          mapId: m.mapId,
+          x: m.x,
+          y: m.y,
+          hp: m.hp,
+          maxHp: m.maxHp,
+          direction: m.direction,
+          state: m.state,
+          spawnX: m.spawnX,
+          spawnY: m.spawnY,
+          target: m.target
+        });
+      }
+    }
+
+    // ------------------ NEARBY PLAYERS ------------------
+    const nearby = getPlayersInAOI(email, position.x, position.y, map);
+    nearby.forEach(p => socket.emit('player:joined', p));
+
+    return; // 🔥 IMPORTANT: STOP HERE
+  }
+
+  // ================= FIRST TIME JOIN =================
+  const baseStats = calculatePlayerStats({ character_class, level });
 
   currentPlayer = {
-  email,
-  name,
-  character_class,
-  level,
-  x: position.x,
-  y: position.y,
-  direction: 'front',
-  state: 'idle',
-  map,
-  socketId: socket.id,
-  lastUpdate: Date.now(),
-  hp: stats.maxHp,
-  maxHp: stats.maxHp,
-  attack: stats.attack,
-  isDead: false,
-  xp: xp ?? 0,
-  inventory: [],
-  statPointsAvailable: 5, // available points for allocation per level
-  stats: { STR: 1, AGI: 1, VIT: 1, INT: 1, DEX: 1, LUCK: 1 },
-  lastAttackTime: 0 // cooldown tracker
-};
-
+    email,
+    name,
+    character_class,
+    level,
+    xp: xp ?? 0,
+    x: position.x,
+    y: position.y,
+    direction: 'front',
+    state: 'idle',
+    map,
+    socketId: socket.id,
+    lastUpdate: Date.now(),
+    hp: baseStats.maxHp,
+    maxHp: baseStats.maxHp,
+    attack: baseStats.attack,
+    isDead: false,
+    inventory: [],
+    statPointsAvailable: 5,
+    stats: { STR: 1, AGI: 1, VIT: 1, INT: 1, DEX: 1, LUCK: 1 },
+    lastAttackTime: 0
+  };
 
   players.set(email, currentPlayer);
 
@@ -466,17 +525,28 @@ socket.on('player:join', (data) => {
   if (!mapPlayers.has(map)) mapPlayers.set(map, new Set());
   mapPlayers.get(map).add(email);
 
-  console.log(`Player ${name} joined map ${map}`);
+  console.log(`🆕 Player ${name} joined map ${map}`);
+
+  // ------------------ XP INIT ------------------
+  socket.emit('player:xpUpdated', {
+    xp: currentPlayer.xp,
+    level: currentPlayer.level,
+    xpToLevel: currentPlayer.level * 100
+  });
+
+  // ------------------ STATS INIT ------------------
+  socket.emit('player:statsInitialized', {
+    stats: currentPlayer.stats,
+    statPointsAvailable: currentPlayer.statPointsAvailable
+  });
 
   // ------------------ MONSTERS ------------------
   spawnMonsters(map);
-
-  // Send existing monsters to this player
   const monstersInMap = mapMonsters.get(map) || new Set();
   for (const monsterId of monstersInMap) {
     const m = monsters.get(monsterId);
     if (m && m.hp > 0) {
-      socket.emit('monster:spawn', { 
+      socket.emit('monster:spawn', {
         id: m.id,
         type: m.type,
         mapId: m.mapId,
@@ -497,18 +567,18 @@ socket.on('player:join', (data) => {
   const nearby = getPlayersInAOI(email, position.x, position.y, map);
   nearby.forEach(p => socket.emit('player:joined', p));
 
-  // Notify others in AOI
-  broadcastToAOI(email, position.x, position.y, map, 'player:joined', { 
+  // Notify others
+  broadcastToAOI(email, position.x, position.y, map, 'player:joined', {
     email,
     name,
     character_class,
     level,
     position,
     direction: 'front',
-    state: 'idle',
-    stats: currentPlayer.stats,
-    statPointsAvailable: currentPlayer.statPointsAvailable
+    state: 'idle'
   });
+});
+
 
   // Also notify this player of their own stats for UI
   socket.emit('player:statsInitialized', {
@@ -516,13 +586,6 @@ socket.on('player:join', (data) => {
     statPointsAvailable: currentPlayer.statPointsAvailable
   });
 });
-
-socket.emit('player:xpUpdated', {
-  xp: currentPlayer.xp,
-  level: currentPlayer.level,
-  xpToLevel: currentPlayer.level * 100
-});
-
 
 socket.on('player:allocateStat', ({ stat, points }) => {
   if (!currentPlayer || currentPlayer.statPointsAvailable < points) return;
