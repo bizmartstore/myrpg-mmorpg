@@ -60,18 +60,19 @@ function calculateDerivedStats(player) {
 
 // ================= LEVEL UP & XP =================
 function levelUpPlayer(player) {
+  // Increase level
   player.level += 1;
 
-  // Calculate derived stats automatically
-  const derived = calculateDerivedStats(player);
-  player.maxHp = derived.maxHp;
-  player.hp = derived.maxHp;    // heal to full on level-up
-  player.attack = derived.attack;
-  player.speed = derived.speed;
+  // Recalculate stats including equipment and derived stats
+  recalcPlayerWithEquipment(player);
 
-  player.statPointsAvailable += 5; // new points to distribute
+  // Heal player to full after level-up
+  player.hp = player.maxHp;
 
-  // Notify player client of level-up and available stats
+  // Give stat points
+  player.statPointsAvailable += 5;
+
+  // Notify player client of level-up and updated stats
   io.to(player.socketId).emit('player:levelUp', {
     level: player.level,
     hp: player.hp,
@@ -444,6 +445,9 @@ socket.on('player:join', (data) => {
     currentPlayer.map = map;
     currentPlayer.lastUpdate = Date.now();
 
+    // Recalculate stats with equipment
+    recalcPlayerWithEquipment(currentPlayer);
+
     // Ensure map registration
     if (!mapPlayers.has(map)) mapPlayers.set(map, new Set());
     mapPlayers.get(map).add(email);
@@ -457,10 +461,14 @@ socket.on('player:join', (data) => {
       xpToLevel: currentPlayer.level * 100
     });
 
-    // ------------------ RESYNC STATS ------------------
+    // ------------------ RESYNC FULL STATS ------------------
     socket.emit('player:statsInitialized', {
       stats: currentPlayer.stats,
-      statPointsAvailable: currentPlayer.statPointsAvailable
+      statPointsAvailable: currentPlayer.statPointsAvailable,
+      hp: currentPlayer.hp,
+      maxHp: currentPlayer.maxHp,
+      attack: currentPlayer.attack,
+      speed: currentPlayer.speed
     });
 
     // ------------------ MONSTERS ------------------
@@ -512,14 +520,19 @@ socket.on('player:join', (data) => {
     hp: baseStats.maxHp,
     maxHp: baseStats.maxHp,
     attack: baseStats.attack,
+    speed: 1, // default speed
     isDead: false,
     inventory: [],
     statPointsAvailable: 5,
     stats: { STR: 1, AGI: 1, VIT: 1, INT: 1, DEX: 1, LUCK: 1 },
-    lastAttackTime: 0
+    lastAttackTime: 0,
+    equipment: {} // initialize equipment
   };
 
   players.set(email, currentPlayer);
+
+  // Apply equipment bonuses
+  recalcPlayerWithEquipment(currentPlayer);
 
   // ------------------ MAP REGISTRATION ------------------
   if (!mapPlayers.has(map)) mapPlayers.set(map, new Set());
@@ -534,10 +547,14 @@ socket.on('player:join', (data) => {
     xpToLevel: currentPlayer.level * 100
   });
 
-  // ------------------ STATS INIT ------------------
+  // ------------------ STATS INIT (FULL) ------------------
   socket.emit('player:statsInitialized', {
     stats: currentPlayer.stats,
-    statPointsAvailable: currentPlayer.statPointsAvailable
+    statPointsAvailable: currentPlayer.statPointsAvailable,
+    hp: currentPlayer.hp,
+    maxHp: currentPlayer.maxHp,
+    attack: currentPlayer.attack,
+    speed: currentPlayer.speed
   });
 
   // ------------------ MONSTERS ------------------
@@ -580,13 +597,6 @@ socket.on('player:join', (data) => {
 });
 
 
-  // Also notify this player of their own stats for UI
-  socket.emit('player:statsInitialized', {
-    stats: currentPlayer.stats,
-    statPointsAvailable: currentPlayer.statPointsAvailable
-  });
-});
-
 socket.on('player:allocateStat', ({ stat, points }) => {
   if (!currentPlayer || currentPlayer.statPointsAvailable < points) return;
   if (!currentPlayer.stats.hasOwnProperty(stat)) return;
@@ -595,15 +605,13 @@ socket.on('player:allocateStat', ({ stat, points }) => {
   currentPlayer.stats[stat] += points;
   currentPlayer.statPointsAvailable -= points;
 
-  // Recalculate derived stats
-  const derived = calculateDerivedStats(currentPlayer);
-  currentPlayer.maxHp = derived.maxHp;
-  // Keep current HP at same proportion of max HP if you want, or heal fully:
-  currentPlayer.hp = Math.min(currentPlayer.hp, currentPlayer.maxHp);
-  currentPlayer.attack = derived.attack;
-  currentPlayer.speed = derived.speed;
+  // Recalculate stats including equipment
+  recalcPlayerWithEquipment(currentPlayer);
 
-  // Send update to client
+  // Keep current HP within max HP
+  currentPlayer.hp = Math.min(currentPlayer.hp, currentPlayer.maxHp);
+
+  // Send updated stats to client
   io.to(currentPlayer.socketId).emit('player:statsUpdated', {
     stats: currentPlayer.stats,
     statPointsAvailable: currentPlayer.statPointsAvailable,
@@ -1031,15 +1039,12 @@ function handlePlayerDeath(player) {
     y: player.y
   });
 
-  // Revive after 3 seconds with derived stats
+  // Revive after 3 seconds with stats including equipment
   setTimeout(() => {
-    const derived = calculateDerivedStats(player);
-    player.maxHp = derived.maxHp;
-    player.hp = derived.maxHp; // heal to full on respawn
-    player.attack = derived.attack;
-    player.speed = derived.speed;
-    player.isDead = false;
+    recalcPlayerWithEquipment(player); // ✅ include equipment bonuses
+    player.hp = player.maxHp;          // heal to full
     player.state = 'idle';
+    player.isDead = false;
 
     io.to(player.socketId).emit('player:revived', {
       hp: player.hp,
@@ -1052,16 +1057,14 @@ function handlePlayerDeath(player) {
 
 function handlePvPDeath(player) {
   if (player.isDead) return;
+
   player.isDead = true;
   player.state = 'dead';
 
-  // Short respawn timer (e.g., 3 seconds)
+  // Short respawn timer (3 seconds)
   setTimeout(() => {
-    const derived = calculateDerivedStats(player); // <-- use new derived stats
-    player.maxHp = derived.maxHp;
-    player.hp = derived.maxHp;   // heal to full
-    player.attack = derived.attack;
-    player.speed = derived.speed;
+    recalcPlayerWithEquipment(player); // ✅ include equipment bonuses
+    player.hp = player.maxHp;          // heal to full
     player.state = 'idle';
     player.isDead = false;
 
@@ -1078,6 +1081,29 @@ function handlePvPDeath(player) {
       y: player.y
     });
   }, 3000);
+}
+
+function recalcPlayerWithEquipment(player) {
+  const base = calculateDerivedStats(player);
+
+  let bonusHp = 0;
+  let bonusAtk = 0;
+  let bonusSpeed = 0;
+
+  if (player.equipment) {
+    for (const item of Object.values(player.equipment)) {
+      if (!item) continue;
+      bonusHp += item.hp || 0;
+      bonusAtk += item.attack || 0;
+      bonusSpeed += item.speed || 0;
+    }
+  }
+
+  player.maxHp = base.maxHp + bonusHp;
+  player.attack = base.attack + bonusAtk;
+  player.speed = base.speed + bonusSpeed;
+
+  player.hp = Math.min(player.hp, player.maxHp);
 }
 
 
