@@ -425,6 +425,9 @@ setInterval(() => {
   }
 }, 100); // 🔥 Slower = safer (10 updates/sec)
 
+// ------------------ REALTIME CHAT ------------------
+const CHAT_COOLDOWN = 5000; // 5 seconds between messages per player
+
 // ------------------ Socket.IO Events ------------------
 io.on('connection', (socket) => {
   console.log('Player connected:', socket.id);
@@ -594,6 +597,81 @@ socket.on('player:join', (data) => {
     direction: 'front',
     state: 'idle'
   });
+});
+
+socket.on('player:sendChat', (data) => {
+  if (!currentPlayer) return;
+  const now = Date.now();
+  const { message, type, targetEmail } = data;
+  const msg = message?.trim();
+  if (!msg || msg.length > 200) return; // optional max length
+
+  // Initialize per-type cooldown
+  if (!currentPlayer.lastChat) currentPlayer.lastChat = {};
+  if (!currentPlayer.lastChat[type]) currentPlayer.lastChat[type] = 0;
+
+  if (now - currentPlayer.lastChat[type] < CHAT_COOLDOWN) {
+    socket.emit('chat:spamBlocked', {
+      message: `You are sending ${type || 'map'} messages too quickly. Please wait a moment.`
+    });
+    return;
+  }
+
+  currentPlayer.lastChat[type] = now;
+
+  let recipients = [];
+
+  switch (type) {
+    case 'private':
+      if (!targetEmail) return;
+      const target = players.get(targetEmail);
+      if (!target || !target.socketId) return;
+      // send to both sender and target
+      recipients.push(target.socketId, currentPlayer.socketId);
+      break;
+
+    case 'global':
+      // send to everyone online
+      recipients = Array.from(players.values())
+        .filter(p => p.socketId)
+        .map(p => p.socketId);
+      break;
+
+    case 'town':
+      // only allow if current map is a town (safeZone)
+      if (!MAPS[currentPlayer.map]?.safeZone) {
+        socket.emit('chat:error', { message: 'You are not in a town map.' });
+        return;
+      }
+      recipients = Array.from(mapPlayers.get(currentPlayer.map) || [])
+        .map(email => players.get(email))
+        .filter(p => p?.socketId)
+        .map(p => p.socketId);
+      break;
+
+    case 'map':
+      // all players in current map
+      recipients = Array.from(mapPlayers.get(currentPlayer.map) || [])
+        .map(email => players.get(email))
+        .filter(p => p?.socketId)
+        .map(p => p.socketId);
+      break;
+
+    default:
+      socket.emit('chat:error', { message: 'Invalid chat type.' });
+      return;
+  }
+
+  // Broadcast message to recipients
+  for (const socketId of recipients) {
+    io.to(socketId).emit('chat:message', {
+      from: currentPlayer.name,
+      message: msg,
+      type,
+      timestamp: now,
+      senderEmail: currentPlayer.email
+    });
+  }
 });
 
 
