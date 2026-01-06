@@ -253,10 +253,7 @@ function monsterAttackPlayer(monster, targetPlayer) {
   const damage = monster.attack;
   targetPlayer.hp = Math.max(0, targetPlayer.hp - damage);
 
-  // Recalculate stats WITHOUT preserving HP ratio (equipment bonuses still apply)
-  recalcPlayerWithEquipment(targetPlayer, { preserveHpRatio: true });
-
-  // Notify the target client of HP change
+  // Notify the target
   io.to(targetPlayer.socketId).emit('player:hpChanged', {
     hp: targetPlayer.hp,
     maxHp: targetPlayer.maxHp,
@@ -264,7 +261,7 @@ function monsterAttackPlayer(monster, targetPlayer) {
     attacker: monster.id
   });
 
-  // Broadcast damage to nearby players (AOI)
+  // Broadcast to AOI
   broadcastToAOI(
     targetPlayer.email,
     targetPlayer.x,
@@ -278,7 +275,7 @@ function monsterAttackPlayer(monster, targetPlayer) {
     }
   );
 
-  // Trigger death if HP is 0
+  // Trigger death if HP depleted
   if (targetPlayer.hp <= 0) {
     handlePlayerDeath(targetPlayer);
   }
@@ -440,7 +437,7 @@ io.on('connection', (socket) => {
 
  // ------------------ PLAYER JOIN ------------------
 socket.on('player:join', (data) => {
-  const { email, name, character_class, level, xp, position, map } = data;
+  const { email, name, character_class, level, xp, position, map, stats, stat_points } = data;
 
   // ================= REJOIN / RECONNECT GUARD =================
   if (players.has(email)) {
