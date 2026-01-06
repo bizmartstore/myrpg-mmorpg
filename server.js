@@ -246,16 +246,20 @@ function spawnMonsters(mapId) {
 
 // ------------------ MONSTER ATTACK PLAYER ------------------
 function monsterAttackPlayer(monster, targetPlayer) {
-  if (!targetPlayer || targetPlayer.isDead) return;
+  // ---------- SAFETY GUARDS ----------
+  if (!monster) return;
+  if (!targetPlayer) return;
+  if (targetPlayer.isDead) return;
+  if (!Number.isFinite(targetPlayer.hp)) return;
+  if (!targetPlayer.socketId) return;
 
-  const damage = Math.floor(monster.attack);
+  // ---------- DAMAGE ----------
+  const damage = Math.max(0, Math.floor(monster.attack || 0));
 
-  targetPlayer.hp = Math.floor(targetPlayer.hp - damage);
+  // ---------- APPLY DAMAGE ----------
+  targetPlayer.hp = Math.max(0, Math.floor(targetPlayer.hp - damage));
 
-  if (targetPlayer.hp <= 0) {
-    targetPlayer.hp = 0;
-  }
-
+  // ---------- SYNC TARGET ----------
   io.to(targetPlayer.socketId).emit('player:hpChanged', {
     hp: targetPlayer.hp,
     maxHp: targetPlayer.maxHp,
@@ -263,6 +267,7 @@ function monsterAttackPlayer(monster, targetPlayer) {
     attacker: monster.id
   });
 
+  // ---------- AOI BROADCAST ----------
   broadcastToAOI(
     targetPlayer.email,
     targetPlayer.x,
@@ -276,7 +281,8 @@ function monsterAttackPlayer(monster, targetPlayer) {
     }
   );
 
-  if (targetPlayer.hp === 0) {
+  // ---------- DEATH CHECK (FIX) ----------
+  if (targetPlayer.hp <= 0) {
     handlePlayerDeath(targetPlayer);
   }
 }
@@ -450,6 +456,12 @@ socket.on('player:join', (data) => {
     currentPlayer.map = map;
     currentPlayer.lastUpdate = Date.now();
 
+     // ✅ ADD THESE LINES
+    if (stats) currentPlayer.stats = stats;
+    if (stat_points !== undefined) {
+    currentPlayer.statPointsAvailable = stat_points;
+    }
+
     // Recalculate stats with equipment
     recalcPlayerWithEquipment(currentPlayer);
 
@@ -506,35 +518,47 @@ socket.on('player:join', (data) => {
     return; // 🔥 IMPORTANT: STOP HERE
   }
 
-  // ================= FIRST TIME JOIN =================
-  const baseStats = calculatePlayerStats({ character_class, level });
+ // ================= FIRST TIME JOIN =================
+currentPlayer = {
+  email,
+  name,
+  character_class,
+  level,
+  xp: xp ?? 0,
 
-  currentPlayer = {
-    email,
-    name,
-    character_class,
-    level,
-    xp: xp ?? 0,
-    x: position.x,
-    y: position.y,
-    direction: 'front',
-    state: 'idle',
-    map,
-    socketId: socket.id,
-    lastUpdate: Date.now(),
-    hp: baseStats.maxHp,
-    maxHp: baseStats.maxHp,
-    attack: baseStats.attack,
-    speed: 1, // default speed
-    isDead: false,
-    inventory: [],
-    statPointsAvailable: 5,
-    stats: { STR: 1, AGI: 1, VIT: 1, INT: 1, DEX: 1, LUCK: 1 },
-    lastAttackTime: 0,
-    equipment: {} // initialize equipment
-  };
+  x: position.x,
+  y: position.y,
+  direction: 'front',
+  state: 'idle',
+  map,
 
-  players.set(email, currentPlayer);
+  socketId: socket.id,
+  lastUpdate: Date.now(),
+
+  // 🔥 USE CLIENT VALUES (OR SAFE DEFAULTS)
+  stats: stats || { STR: 1, AGI: 1, VIT: 1, INT: 1, DEX: 1, LUCK: 1 },
+  statPointsAvailable: stat_points ?? 0,
+
+  // Temp values – recalculated below
+  hp: 1,
+  maxHp: 1,
+  attack: 1,
+  speed: 1,
+
+  isDead: false,
+  inventory: [],
+  lastAttackTime: 0,
+  equipment: {} // initialize equipment
+};
+
+players.set(email, currentPlayer);
+
+// ✅ Recalculate EVERYTHING from stats + class
+recalcPlayerWithEquipment(currentPlayer, { preserveHpRatio: false });
+
+// ✅ Ensure full HP on first join
+currentPlayer.hp = currentPlayer.maxHp;
+
 
   // Apply equipment bonuses
   recalcPlayerWithEquipment(currentPlayer, { preserveHpRatio: false });
