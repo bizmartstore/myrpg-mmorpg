@@ -254,7 +254,7 @@ function monsterAttackPlayer(monster, targetPlayer) {
   targetPlayer.hp = Math.max(0, targetPlayer.hp - damage);
 
   // Recalculate stats WITHOUT preserving HP ratio (equipment bonuses still apply)
-  recalcPlayerWithEquipment(targetPlayer, { preserveHpRatio: false });
+  recalcPlayerWithEquipment(targetPlayer, { preserveHpRatio: true });
 
   // Notify the target client of HP change
   io.to(targetPlayer.socketId).emit('player:hpChanged', {
