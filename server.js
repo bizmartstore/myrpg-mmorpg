@@ -245,6 +245,7 @@ function spawnMonsters(mapId) {
 
 
 // ------------------ MONSTER ATTACK PLAYER ------------------
+// Call this in your monster AI attack logic
 function monsterAttackPlayer(monster, targetPlayer) {
   if (!targetPlayer || targetPlayer.isDead) return;
 
@@ -282,28 +283,21 @@ function monsterAttackPlayer(monster, targetPlayer) {
 
 function updateMonsterAI() {
   const now = Date.now();
-
   for (const [monsterId, monster] of monsters.entries()) {
-    // ------------------ SKIP DEAD OR MISSING MONSTERS ------------------
-    if (!monster || monster.isDead || monster.hp <= 0) continue;
+    if (monster.hp <= 0) continue;
 
     const playersInMap = mapPlayers.get(monster.mapId);
-    if (!playersInMap || playersInMap.size === 0) {
-      monster.state = 'idle';
-      monster.target = null;
-      continue;
-    }
+    if (!playersInMap || playersInMap.size === 0) continue;
 
-    // ------------------ FIND CLOSEST PLAYER ------------------
     let closestPlayer = null;
     let closestDist = Infinity;
 
+    // Find closest player within aggro range
     for (const email of playersInMap) {
       const p = players.get(email);
       if (!p || p.isDead) continue;
-
       const dist = getDistance(monster.x, monster.y, p.x, p.y);
-      if (dist < closestDist && dist <= monster.aggroRange) {
+      if (dist < closestDist && dist < monster.aggroRange) {
         closestDist = dist;
         closestPlayer = p;
       }
@@ -312,20 +306,16 @@ function updateMonsterAI() {
     if (closestPlayer) {
       monster.target = closestPlayer.email;
 
-      // ------------------ CHASE PLAYER ------------------
       if (closestDist > monster.attackRange) {
+        // -------------------- CHASE --------------------
         const angle = Math.atan2(closestPlayer.y - monster.y, closestPlayer.x - monster.x);
         monster.x += Math.cos(angle) * monster.speed;
         monster.y += Math.sin(angle) * monster.speed;
-
-        // Determine direction
         monster.direction = Math.abs(Math.cos(angle)) > Math.abs(Math.sin(angle))
           ? (Math.cos(angle) > 0 ? 'right' : 'left')
           : (Math.sin(angle) > 0 ? 'front' : 'back');
-
         monster.state = 'chasing';
 
-        // Broadcast movement periodically
         if (now - monster.lastUpdate > 100) {
           broadcastToMap(monster.mapId, 'monster:move', {
             id: monsterId,
@@ -337,15 +327,13 @@ function updateMonsterAI() {
           });
           monster.lastUpdate = now;
         }
-
       } else {
-        // ------------------ ATTACK PLAYER ------------------
-        if (!monster.lastAttack || now - monster.lastAttack >= monster.attackCooldown) {
+        // -------------------- ATTACK --------------------
+        if (now - monster.lastAttack > monster.attackCooldown) {
           monster.state = 'attacking';
           monster.lastAttack = now;
-          monster.attackEndTime = now + 400; // attack animation duration
 
-          // Broadcast attack
+          // Broadcast attack animation
           broadcastToMap(monster.mapId, 'monster:attack', {
             id: monsterId,
             mapId: monster.mapId,
@@ -356,53 +344,37 @@ function updateMonsterAI() {
             direction: monster.direction
           });
 
-          // Deal damage
+          // Deal damage to player & auto-death check
           monsterAttackPlayer(monster, closestPlayer);
-        }
 
-        // Return to idle automatically after attack
-        if (monster.attackEndTime && now >= monster.attackEndTime) {
-          monster.state = 'idle';
-          monster.attackEndTime = null;
+          setTimeout(() => {
+            if (monster.hp > 0) monster.state = 'idle';
+          }, 400);
         }
       }
-
     } else {
-      // ------------------ NO TARGET: IDLE / WANDER ------------------
+      // -------------------- IDLE / WANDER --------------------
       monster.target = null;
-
-      if (now - monster.lastUpdate > 500) {
-        monster.state = 'idle';
-
-        // Random wandering
-        if (Math.random() > 0.98) {
-          const angle = Math.random() * Math.PI * 2;
-          monster.x += Math.cos(angle) * 10;
-          monster.y += Math.sin(angle) * 10;
-
-          // Clamp to map boundaries
-          monster.x = Math.max(0, Math.min(monster.x, MAP_WIDTH));
-          monster.y = Math.max(0, Math.min(monster.y, MAP_HEIGHT));
-
-          broadcastToMap(monster.mapId, 'monster:move', {
-            id: monsterId,
-            mapId: monster.mapId,
-            x: monster.x,
-            y: monster.y,
-            direction: monster.direction,
-            state: 'idle'
-          });
-        }
-
+      monster.state = 'idle';
+      if (Math.random() > 0.99 && now - monster.lastUpdate > 500) {
+        const angle = Math.random() * Math.PI * 2;
+        monster.x += Math.cos(angle) * 10;
+        monster.y += Math.sin(angle) * 10;
+        broadcastToMap(monster.mapId, 'monster:move', {
+          id: monsterId,
+          mapId: monster.mapId,
+          x: monster.x,
+          y: monster.y,
+          direction: monster.direction,
+          state: 'idle'
+        });
         monster.lastUpdate = now;
       }
     }
   }
 }
 
-// ------------------ RUN AI EVERY 100ms ------------------
 setInterval(updateMonsterAI, 100);
-
 
 // ------------------ Player & Monster Broadcast (FIXED) ------------------
 
@@ -465,7 +437,7 @@ io.on('connection', (socket) => {
 
  // ------------------ PLAYER JOIN ------------------
 socket.on('player:join', (data) => {
-  const { email, name, character_class, level, xp, position, map, stats, stat_points } = data;
+  const { email, name, character_class, level, xp, position, map } = data;
 
   // ================= REJOIN / RECONNECT GUARD =================
   if (players.has(email)) {
@@ -477,12 +449,6 @@ socket.on('player:join', (data) => {
     currentPlayer.y = position.y;
     currentPlayer.map = map;
     currentPlayer.lastUpdate = Date.now();
-
-     // ✅ ADD THESE LINES
-    if (stats) currentPlayer.stats = stats;
-    if (stat_points !== undefined) {
-    currentPlayer.statPointsAvailable = stat_points;
-    }
 
     // Recalculate stats with equipment
     recalcPlayerWithEquipment(currentPlayer);
@@ -540,51 +506,38 @@ socket.on('player:join', (data) => {
     return; // 🔥 IMPORTANT: STOP HERE
   }
 
- // ================= FIRST TIME JOIN =================
-currentPlayer = {
-  email,
-  name,
-  character_class,
-  level,
-  xp: xp ?? 0,
+  // ================= FIRST TIME JOIN =================
+  const baseStats = calculatePlayerStats({ character_class, level });
 
-  x: position.x,
-  y: position.y,
-  direction: 'front',
-  state: 'idle',
-  map,
+  currentPlayer = {
+    email,
+    name,
+    character_class,
+    level,
+    xp: xp ?? 0,
+    x: position.x,
+    y: position.y,
+    direction: 'front',
+    state: 'idle',
+    map,
+    socketId: socket.id,
+    lastUpdate: Date.now(),
+    hp: baseStats.maxHp,
+    maxHp: baseStats.maxHp,
+    attack: baseStats.attack,
+    speed: 1, // default speed
+    isDead: false,
+    inventory: [],
+    statPointsAvailable: 5,
+    stats: { STR: 1, AGI: 1, VIT: 1, INT: 1, DEX: 1, LUCK: 1 },
+    lastAttackTime: 0,
+    equipment: {} // initialize equipment
+  };
 
-  socketId: socket.id,
-  lastUpdate: Date.now(),
-
-  // 🔥 USE CLIENT VALUES (OR SAFE DEFAULTS)
-  stats: stats || { STR: 1, AGI: 1, VIT: 1, INT: 1, DEX: 1, LUCK: 1 },
-  statPointsAvailable: stat_points ?? 0,
-
-  // Temp values – recalculated below
-  hp: 1,
-  maxHp: 1,
-  attack: 1,
-  speed: 1,
-
-  isDead: false,
-  inventory: [],
-  lastAttackTime: 0,
-  equipment: {} // initialize equipment
-};
-
-players.set(email, currentPlayer);
-
-// ✅ Recalculate EVERYTHING from stats + class
-recalcPlayerWithEquipment(currentPlayer, { preserveHpRatio: false });
-
-// ✅ Ensure full HP on first join
-currentPlayer.hp = currentPlayer.maxHp;
-
+  players.set(email, currentPlayer);
 
   // Apply equipment bonuses
-  recalcPlayerWithEquipment(currentPlayer, { preserveHpRatio: false });
-  currentPlayer.hp = currentPlayer.maxHp; // ✅ ensure full HP on join
+  recalcPlayerWithEquipment(currentPlayer);
 
   // ------------------ MAP REGISTRATION ------------------
   if (!mapPlayers.has(map)) mapPlayers.set(map, new Set());
@@ -728,12 +681,17 @@ socket.on('player:allocateStat', ({ stat, points }) => {
   if (!currentPlayer || currentPlayer.statPointsAvailable < points) return;
   if (!currentPlayer.stats.hasOwnProperty(stat)) return;
 
+  // Allocate points
   currentPlayer.stats[stat] += points;
   currentPlayer.statPointsAvailable -= points;
 
-  // 🔥 FULL HEAL ON STAT ALLOCATION
-  recalcPlayerWithEquipment(currentPlayer, { preserveHpRatio: false });
+  // Recalculate stats including equipment
+  recalcPlayerWithEquipment(currentPlayer);
 
+  // Keep current HP within max HP
+  currentPlayer.hp = Math.min(currentPlayer.hp, currentPlayer.maxHp);
+
+  // Send updated stats to client
   io.to(currentPlayer.socketId).emit('player:statsUpdated', {
     stats: currentPlayer.stats,
     statPointsAvailable: currentPlayer.statPointsAvailable,
@@ -757,21 +715,20 @@ socket.on('player:pvpAttack', (data) => {
 
   const target = players.get(targetEmail);
   if (!target || target.isDead) return;
-
+  
   // Only allow PvP in pvp_arena
   if (currentPlayer.map !== 'pvp_arena' || target.map !== 'pvp_arena') return;
 
-  // ------------------ Calculate damage (server authoritative) ------------------
-  const calculateDamage = (player) => {
-    let dmg = player.attack; // already includes STR bonus from recalcPlayerWithEquipment
-    // Critical hit based on LUCK
-    if (Math.random() < (player.stats.LUCK || 0) * 0.05) {
-      dmg *= 2;
-    }
-    return Math.round(dmg);
-  };
+  // ------------------ Calculate damage ------------------
+  let damage = currentPlayer.attack;
 
-  const damage = calculateDamage(currentPlayer);
+  // STR increases damage
+  damage += currentPlayer.stats.STR * 2;
+
+  // LUCK for crits (double damage)
+  if (Math.random() < currentPlayer.stats.LUCK * 0.05) {
+    damage *= 2;
+  }
 
   // Apply damage to target
   target.hp = Math.max(0, target.hp - damage);
@@ -791,12 +748,12 @@ socket.on('player:pvpAttack', (data) => {
     attacker: currentPlayer.email
   });
 
-  // Notify nearby players (AOI)
-  broadcastToAOI(currentPlayer.email, currentPlayer.x, currentPlayer.y, currentPlayer.map, 'player:pvpHit', {
-    attacker: currentPlayer.email,
-    target: targetEmail,
-    damage
-  });
+  // Optional: notify nearby players via AOI (throttle if needed)
+  // broadcastToAOI(currentPlayer.email, currentPlayer.x, currentPlayer.y, currentPlayer.map, 'player:pvpHit', {
+  //   attacker: currentPlayer.email,
+  //   target: targetEmail,
+  //   damage
+  // });
 
   // ------------------ Check death & respawn ------------------
   if (target.hp <= 0) {
@@ -809,68 +766,49 @@ socket.on('player:pvpAttack', (data) => {
 
 
   // ------------------ PLAYER ATTACKS MONSTER ------------------
-socket.on('monster:hit', ({ monsterId }) => {
+socket.on('monster:hit', (data) => {
   if (!currentPlayer || currentPlayer.isDead) return;
 
+  const { monsterId, damage } = data;
   const monster = monsters.get(monsterId);
   if (!monster || monster.mapId !== currentPlayer.map || monster.hp <= 0) return;
 
-  // ------------------ SERVER-CALCULATED DAMAGE ------------------
-  let damage = currentPlayer.attack;
-
-  // Critical hit chance based on LUCK
-  if (Math.random() < (currentPlayer.stats.LUCK || 0) * 0.05) {
-    damage *= 2;
-  }
-  damage = Math.max(1, Math.floor(damage));
-
-  // Apply damage
+  // ---- APPLY DAMAGE (SERVER AUTHORITATIVE) ----
   monster.hp = Math.max(0, monster.hp - damage);
   monster.lastHitBy = currentPlayer.email;
 
-  // Broadcast damage to all players in map
+  // ---- BROADCAST HIT ----
   broadcastToMap(monster.mapId, 'monster:hit', {
-    id: monster.id,
+    id: monsterId,
     mapId: monster.mapId,
     hp: monster.hp,
     damage
   });
 
-  // ------------------ MONSTER DEATH HANDLER ------------------
-  if (monster.hp <= 0 && !monster.isDead) {
-    monster.isDead = true; // Mark monster as dead to stop AI loop
-    monster.state = 'dead';
-    monster.target = null;
-
-    // Notify map of despawn
+  // ------------------ MONSTER DEAD ------------------
+  if (monster.hp <= 0) {
     broadcastToMap(monster.mapId, 'monster:despawn', {
-      id: monster.id,
+      id: monsterId,
       mapId: monster.mapId
     });
 
-    // Remove monster from mapMonsters and monsters map after a short delay to allow animations
-    setTimeout(() => {
-      monsters.delete(monster.id);
-      mapMonsters.get(monster.mapId)?.delete(monster.id);
-    }, 100); // small delay to avoid AI trying to move dead monster
-
-    // Give XP, loot, and coins to killer
     const killer = players.get(monster.lastHitBy);
     if (killer) {
       const stats = MONSTER_STATS[monster.type];
 
-      // XP
+      // ---------- GIVE XP ----------
       giveXp(killer, stats.xp);
 
-      // Loot / coins
+      // ---------- GIVE BCOINS ----------
+      const bcoinsAmount = Math.floor(Math.random() * 21) + 10; // 10–30
+
+      // ---------- GIVE LOOT ----------
       const lootItem = stats.loot[Math.floor(Math.random() * stats.loot.length)];
       killer.inventory.push(lootItem);
 
-      const bcoinsAmount = Math.floor(Math.random() * 21) + 10; // 10–30
-
-      // Spawn drop
+      // ---------- SPAWN DROP ----------
       const dropId = `drop_${Date.now()}_${Math.random()}`;
-      broadcastToMap(monster.mapId, 'drop:spawn', {
+      const drop = {
         id: dropId,
         x: monster.x,
         y: monster.y,
@@ -878,11 +816,13 @@ socket.on('monster:hit', ({ monsterId }) => {
         amount: bcoinsAmount,
         itemName: lootItem,
         mapId: monster.mapId
-      });
+      };
 
-      // Notify killer
+      broadcastToMap(monster.mapId, 'drop:spawn', drop);
+
+      // ---------- NOTIFY KILLER (EXP BAR FIX) ----------
       io.to(killer.socketId).emit('monster:killed', {
-        monsterId: monster.id,
+        monsterId,
         xp: stats.xp,
         currentXp: killer.xp,
         level: killer.level,
@@ -894,14 +834,30 @@ socket.on('monster:hit', ({ monsterId }) => {
       });
     }
 
-    // ------------------ SAFE RESPAWN ------------------
+    // ---------- SAFE RESPAWN ----------
     setTimeout(() => {
-      spawnMonsters(monster.mapId);
+      if (!monsters.has(monsterId)) return;
+
+      monster.hp = monster.maxHp;
+      monster.x = monster.spawnX;
+      monster.y = monster.spawnY;
+      monster.state = 'idle';
+      monster.target = null;
+
+      broadcastToMap(monster.mapId, 'monster:spawn', {
+        id: monster.id,
+        type: monster.type,
+        mapId: monster.mapId,
+        x: monster.x,
+        y: monster.y,
+        hp: monster.hp,
+        maxHp: monster.maxHp,
+        direction: monster.direction,
+        state: monster.state
+      });
     }, 5000);
   }
 });
-
-
 
 
 // ------------------ PLAYER MOVEMENT ------------------
@@ -1113,53 +1069,27 @@ socket.on('player:changeMap', (data) => {
 
 
  // ------------------ DISCONNECT ------------------
-socket.on('disconnect', async () => {
-  if (!currentPlayer) return;
+  socket.on('disconnect', () => {
+    if (!currentPlayer) return;
 
-  console.log(`Player ${currentPlayer.name} disconnected`);
+    console.log(`Player ${currentPlayer.name} disconnected`);
 
-  // Remove from map presence (this is correct)
-  if (mapPlayers.has(currentPlayer.map)) {
-    mapPlayers.get(currentPlayer.map).delete(currentPlayer.email);
+    if (mapPlayers.has(currentPlayer.map)) {
+      mapPlayers.get(currentPlayer.map).delete(currentPlayer.email);
+      broadcastToAOI(
+        currentPlayer.email,
+        currentPlayer.x,
+        currentPlayer.y,
+        currentPlayer.map,
+        'player:left',
+        currentPlayer.email
+      );
+      cleanupMapIfEmpty(currentPlayer.map);
+    }
 
-    broadcastToAOI(
-      currentPlayer.email,
-      currentPlayer.x,
-      currentPlayer.y,
-      currentPlayer.map,
-      'player:left',
-      currentPlayer.email
-    );
-
-    cleanupMapIfEmpty(currentPlayer.map);
-  }
-
-  // IMPORTANT: do NOT delete the player
-  // Keep server state authoritative
-  currentPlayer.socketId = null;
-  currentPlayer.isOnline = false;
-
-  // OPTIONAL BUT RECOMMENDED: save authoritative state
-  try {
-    await savePlayerStats(currentPlayer);
-  } catch (err) {
-    console.error('Failed to save player on disconnect', err);
-  }
-});
-
-
-
-async function savePlayerStats(player) {
-  await base44.entities.PlayerProfile.update(player.profileId, {
-    str: player.stats.STR,
-    agi: player.stats.AGI,
-    vit: player.stats.VIT,
-    int: player.stats.INT,
-    dex: player.stats.DEX,
-    luck: player.stats.LUCK,
-    stat_points: player.statPointsAvailable
+    players.delete(currentPlayer.email);
   });
-}
+});
 
 // ------------------ PLAYER DEATH HANDLER ------------------
 function handlePlayerDeath(player) {
@@ -1233,53 +1163,30 @@ function handlePvPDeath(player) {
   }, 3000);
 }
 
-function recalcPlayerWithEquipment(player, options = {}) {
-  if (!player) return;
-
-  const preserveHpRatio = options.preserveHpRatio ?? true;
-
-  // 🔒 STORE OLD VALUES FIRST
-  const oldHp = Number.isFinite(player.hp) ? player.hp : 0;
-  const oldMaxHp = Number.isFinite(player.maxHp) ? player.maxHp : 1;
-
-  // ------------------ BASE + DERIVED STATS ------------------
+function recalcPlayerWithEquipment(player) {
   const base = calculateDerivedStats(player);
 
-  // ------------------ EQUIPMENT BONUSES ------------------
-  const bonus = {};
+  let bonusHp = 0;
+  let bonusAtk = 0;
+  let bonusSpeed = 0;
+
   if (player.equipment) {
     for (const item of Object.values(player.equipment)) {
       if (!item) continue;
-      for (const [k, v] of Object.entries(item)) {
-        if (typeof v === 'number') {
-          bonus[k] = (bonus[k] || 0) + v;
-        }
-      }
+      bonusHp += item.hp || 0;
+      bonusAtk += item.attack || 0;
+      bonusSpeed += item.speed || 0;
     }
   }
 
-  // ------------------ APPLY FINAL STATS ------------------
-  player.maxHp = (base.maxHp || 0) + (bonus.maxHp || 0);
-  player.attack = (base.attack || 0) + (bonus.attack || 0);
-  player.speed  = (base.speed  || 1) + (bonus.speed  || 0);
+  player.maxHp = base.maxHp + bonusHp;
+  player.attack = base.attack + bonusAtk;
+  player.speed = base.speed + bonusSpeed;
 
-  // ------------------ HP HANDLING (FIXED) ------------------
-  if (!player.isDead) {
-    if (preserveHpRatio && oldMaxHp > 0) {
-      const ratio = oldHp / oldMaxHp;
-      player.hp = Math.floor(player.maxHp * ratio);
-    } else {
-      player.hp = player.maxHp;
-    }
-  }
-
-  // HARD CLAMP (IMPORTANT)
-  if (!Number.isFinite(player.hp) || player.hp < 0) player.hp = 0;
-  if (player.hp > player.maxHp) player.hp = player.maxHp;
+  player.hp = Math.min(player.hp, player.maxHp);
 }
 
 
-});
 
 // Start server
 server.listen(PORT, () => {
