@@ -1105,6 +1105,7 @@ socket.on('disconnect', async () => {
 });
 
 
+
 async function savePlayerStats(player) {
   await base44.entities.PlayerProfile.update(player.profileId, {
     str: player.stats.STR,
@@ -1259,7 +1260,7 @@ function recalcPlayerWithEquipment(player) {
 }
 
 
-
+});
 
 // Start server
 server.listen(PORT, () => {
