@@ -289,21 +289,28 @@ function monsterAttackPlayer(monster, targetPlayer) {
 
 function updateMonsterAI() {
   const now = Date.now();
+
   for (const [monsterId, monster] of monsters.entries()) {
-    if (monster.hp <= 0) continue;
+    // ------------------ SKIP DEAD OR REMOVED MONSTERS ------------------
+    if (!monster || monster.hp <= 0) continue;
 
     const playersInMap = mapPlayers.get(monster.mapId);
-    if (!playersInMap || playersInMap.size === 0) continue;
+    if (!playersInMap || playersInMap.size === 0) {
+      monster.state = 'idle';
+      monster.target = null;
+      continue;
+    }
 
+    // ------------------ FIND CLOSEST PLAYER ------------------
     let closestPlayer = null;
     let closestDist = Infinity;
 
-    // Find closest player within aggro range
     for (const email of playersInMap) {
       const p = players.get(email);
       if (!p || p.isDead) continue;
+
       const dist = getDistance(monster.x, monster.y, p.x, p.y);
-      if (dist < closestDist && dist < monster.aggroRange) {
+      if (dist < closestDist && dist <= monster.aggroRange) {
         closestDist = dist;
         closestPlayer = p;
       }
@@ -312,16 +319,19 @@ function updateMonsterAI() {
     if (closestPlayer) {
       monster.target = closestPlayer.email;
 
+      // ------------------ CHASE PLAYER ------------------
       if (closestDist > monster.attackRange) {
-        // -------------------- CHASE --------------------
         const angle = Math.atan2(closestPlayer.y - monster.y, closestPlayer.x - monster.x);
         monster.x += Math.cos(angle) * monster.speed;
         monster.y += Math.sin(angle) * monster.speed;
+
         monster.direction = Math.abs(Math.cos(angle)) > Math.abs(Math.sin(angle))
           ? (Math.cos(angle) > 0 ? 'right' : 'left')
           : (Math.sin(angle) > 0 ? 'front' : 'back');
+
         monster.state = 'chasing';
 
+        // Broadcast movement at a safe interval
         if (now - monster.lastUpdate > 100) {
           broadcastToMap(monster.mapId, 'monster:move', {
             id: monsterId,
@@ -334,8 +344,8 @@ function updateMonsterAI() {
           monster.lastUpdate = now;
         }
       } else {
-        // -------------------- ATTACK --------------------
-        if (now - monster.lastAttack > monster.attackCooldown) {
+        // ------------------ ATTACK PLAYER ------------------
+        if (!monster.lastAttack || now - monster.lastAttack >=   monster.attackCooldown) {
           monster.state = 'attacking';
           monster.lastAttack = now;
 
@@ -350,36 +360,48 @@ function updateMonsterAI() {
             direction: monster.direction
           });
 
-          // Deal damage to player & auto-death check
+          // Deal damage
           monsterAttackPlayer(monster, closestPlayer);
 
+          // Return to idle after attack animation
           setTimeout(() => {
             if (monster.hp > 0) monster.state = 'idle';
           }, 400);
         }
       }
     } else {
-      // -------------------- IDLE / WANDER --------------------
+      // ------------------ NO TARGET: IDLE / WANDER ------------------
       monster.target = null;
-      monster.state = 'idle';
-      if (Math.random() > 0.99 && now - monster.lastUpdate > 500) {
-        const angle = Math.random() * Math.PI * 2;
-        monster.x += Math.cos(angle) * 10;
-        monster.y += Math.sin(angle) * 10;
-        broadcastToMap(monster.mapId, 'monster:move', {
-          id: monsterId,
-          mapId: monster.mapId,
-          x: monster.x,
-          y: monster.y,
-          direction: monster.direction,
-          state: 'idle'
-        });
+
+      if (now - monster.lastUpdate > 500) {
+        monster.state = 'idle';
+
+        if (Math.random() > 0.98) {
+          const angle = Math.random() * Math.PI * 2;
+          monster.x += Math.cos(angle) * 10;
+          monster.y += Math.sin(angle) * 10;
+
+          // Optional: clamp monster to map boundaries
+          monster.x = Math.max(0, Math.min(monster.x, MAP_WIDTH));
+          monster.y = Math.max(0, Math.min(monster.y, MAP_HEIGHT));
+
+          broadcastToMap(monster.mapId, 'monster:move', {
+            id: monsterId,
+            mapId: monster.mapId,
+            x: monster.x,
+            y: monster.y,
+            direction: monster.direction,
+            state: 'idle'
+          });
+        }
+
         monster.lastUpdate = now;
       }
     }
   }
 }
 
+// ------------------ RUN AI EVERY 100ms ------------------
 setInterval(updateMonsterAI, 100);
 
 // ------------------ Player & Monster Broadcast (FIXED) ------------------
@@ -787,49 +809,62 @@ socket.on('player:pvpAttack', (data) => {
 
 
   // ------------------ PLAYER ATTACKS MONSTER ------------------
-socket.on('monster:hit', (data) => {
+socket.on('monster:hit', ({ monsterId }) => {
   if (!currentPlayer || currentPlayer.isDead) return;
 
-  const { monsterId, damage } = data;
   const monster = monsters.get(monsterId);
   if (!monster || monster.mapId !== currentPlayer.map || monster.hp <= 0) return;
 
-  // ---- APPLY DAMAGE (SERVER AUTHORITATIVE) ----
+  // ------------------ SERVER-CALCULATED DAMAGE ------------------
+  let damage = currentPlayer.attack;
+
+  // Critical hit chance based on LUCK
+  if (Math.random() < (currentPlayer.stats.LUCK || 0) * 0.05) {
+    damage *= 2;
+  }
+  damage = Math.max(1, Math.floor(damage));
+
+  // Apply damage
   monster.hp = Math.max(0, monster.hp - damage);
   monster.lastHitBy = currentPlayer.email;
 
-  // ---- BROADCAST HIT ----
+  // Broadcast damage to all players in map
   broadcastToMap(monster.mapId, 'monster:hit', {
-    id: monsterId,
+    id: monster.id,
     mapId: monster.mapId,
     hp: monster.hp,
     damage
   });
 
-  // ------------------ MONSTER DEAD ------------------
+  // ------------------ MONSTER DEATH HANDLER ------------------
   if (monster.hp <= 0) {
+    // Remove monster immediately from AI & map set
+    monsters.delete(monster.id);
+    mapMonsters.get(monster.mapId)?.delete(monster.id);
+
+    // Notify map of despawn
     broadcastToMap(monster.mapId, 'monster:despawn', {
-      id: monsterId,
+      id: monster.id,
       mapId: monster.mapId
     });
 
+    // Give XP, loot, and coins to killer
     const killer = players.get(monster.lastHitBy);
     if (killer) {
       const stats = MONSTER_STATS[monster.type];
 
-      // ---------- GIVE XP ----------
+      // XP
       giveXp(killer, stats.xp);
 
-      // ---------- GIVE BCOINS ----------
-      const bcoinsAmount = Math.floor(Math.random() * 21) + 10; // 10–30
-
-      // ---------- GIVE LOOT ----------
+      // Loot / coins
       const lootItem = stats.loot[Math.floor(Math.random() * stats.loot.length)];
       killer.inventory.push(lootItem);
 
-      // ---------- SPAWN DROP ----------
+      const bcoinsAmount = Math.floor(Math.random() * 21) + 10; // 10–30
+
+      // Spawn drop
       const dropId = `drop_${Date.now()}_${Math.random()}`;
-      const drop = {
+      broadcastToMap(monster.mapId, 'drop:spawn', {
         id: dropId,
         x: monster.x,
         y: monster.y,
@@ -837,13 +872,11 @@ socket.on('monster:hit', (data) => {
         amount: bcoinsAmount,
         itemName: lootItem,
         mapId: monster.mapId
-      };
+      });
 
-      broadcastToMap(monster.mapId, 'drop:spawn', drop);
-
-      // ---------- NOTIFY KILLER (EXP BAR FIX) ----------
+      // Notify killer
       io.to(killer.socketId).emit('monster:killed', {
-        monsterId,
+        monsterId: monster.id,
         xp: stats.xp,
         currentXp: killer.xp,
         level: killer.level,
@@ -855,30 +888,14 @@ socket.on('monster:hit', (data) => {
       });
     }
 
-    // ---------- SAFE RESPAWN ----------
+    // ------------------ SAFE RESPAWN ------------------
     setTimeout(() => {
-      if (!monsters.has(monsterId)) return;
-
-      monster.hp = monster.maxHp;
-      monster.x = monster.spawnX;
-      monster.y = monster.spawnY;
-      monster.state = 'idle';
-      monster.target = null;
-
-      broadcastToMap(monster.mapId, 'monster:spawn', {
-        id: monster.id,
-        type: monster.type,
-        mapId: monster.mapId,
-        x: monster.x,
-        y: monster.y,
-        hp: monster.hp,
-        maxHp: monster.maxHp,
-        direction: monster.direction,
-        state: monster.state
-      });
+      // Spawn a new monster using your existing spawn logic
+      spawnMonsters(monster.mapId);
     }, 5000);
   }
 });
+
 
 
 // ------------------ PLAYER MOVEMENT ------------------
