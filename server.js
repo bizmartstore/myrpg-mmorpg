@@ -245,15 +245,17 @@ function spawnMonsters(mapId) {
 
 
 // ------------------ MONSTER ATTACK PLAYER ------------------
-// Call this in your monster AI attack logic
 function monsterAttackPlayer(monster, targetPlayer) {
   if (!targetPlayer || targetPlayer.isDead) return;
 
-  // Apply damage
-  const damage = monster.attack;
-  targetPlayer.hp = Math.max(0, targetPlayer.hp - damage);
+  const damage = Math.floor(monster.attack);
 
-  // Notify the target
+  targetPlayer.hp = Math.floor(targetPlayer.hp - damage);
+
+  if (targetPlayer.hp <= 0) {
+    targetPlayer.hp = 0;
+  }
+
   io.to(targetPlayer.socketId).emit('player:hpChanged', {
     hp: targetPlayer.hp,
     maxHp: targetPlayer.maxHp,
@@ -261,7 +263,6 @@ function monsterAttackPlayer(monster, targetPlayer) {
     attacker: monster.id
   });
 
-  // Broadcast to AOI
   broadcastToAOI(
     targetPlayer.email,
     targetPlayer.x,
@@ -275,8 +276,7 @@ function monsterAttackPlayer(monster, targetPlayer) {
     }
   );
 
-  // Trigger death if HP depleted
-  if (targetPlayer.hp <= 0) {
+  if (targetPlayer.hp === 0) {
     handlePlayerDeath(targetPlayer);
   }
 }
@@ -682,17 +682,12 @@ socket.on('player:allocateStat', ({ stat, points }) => {
   if (!currentPlayer || currentPlayer.statPointsAvailable < points) return;
   if (!currentPlayer.stats.hasOwnProperty(stat)) return;
 
-  // Allocate points
   currentPlayer.stats[stat] += points;
   currentPlayer.statPointsAvailable -= points;
 
-  // Recalculate stats including equipment
-  recalcPlayerWithEquipment(currentPlayer);
+  // 🔥 FULL HEAL ON STAT ALLOCATION
+  recalcPlayerWithEquipment(currentPlayer, { preserveHpRatio: false });
 
-  // Keep current HP within max HP
-  currentPlayer.hp = Math.min(currentPlayer.hp, currentPlayer.maxHp);
-
-  // Send updated stats to client
   io.to(currentPlayer.socketId).emit('player:statsUpdated', {
     stats: currentPlayer.stats,
     statPointsAvailable: currentPlayer.statPointsAvailable,
@@ -1194,56 +1189,46 @@ function handlePvPDeath(player) {
 function recalcPlayerWithEquipment(player, options = {}) {
   if (!player) return;
 
-  const preserveHpRatio = options.preserveHpRatio ?? true; // default: true
+  const preserveHpRatio = options.preserveHpRatio ?? true;
 
-  // ------------------ CALCULATE BASE DERIVED STATS ------------------
+  // 🔒 STORE OLD VALUES FIRST
+  const oldHp = Number.isFinite(player.hp) ? player.hp : 0;
+  const oldMaxHp = Number.isFinite(player.maxHp) ? player.maxHp : 1;
+
+  // ------------------ BASE + DERIVED STATS ------------------
   const base = calculateDerivedStats(player);
 
-  // ------------------ APPLY EQUIPMENT BONUSES ------------------
+  // ------------------ EQUIPMENT BONUSES ------------------
   const bonus = {};
   if (player.equipment) {
     for (const item of Object.values(player.equipment)) {
       if (!item) continue;
-      for (const [statKey, value] of Object.entries(item)) {
-        if (typeof value === 'number') {
-          bonus[statKey] = (bonus[statKey] || 0) + value;
+      for (const [k, v] of Object.entries(item)) {
+        if (typeof v === 'number') {
+          bonus[k] = (bonus[k] || 0) + v;
         }
       }
     }
   }
 
-  // ------------------ APPLY BASE + EQUIPMENT ------------------
-  for (const [statKey, baseValue] of Object.entries(base)) {
-    player[statKey] = (baseValue || 0) + (bonus[statKey] || 0);
-  }
+  // ------------------ APPLY FINAL STATS ------------------
+  player.maxHp = (base.maxHp || 0) + (bonus.maxHp || 0);
+  player.attack = (base.attack || 0) + (bonus.attack || 0);
+  player.speed  = (base.speed  || 1) + (bonus.speed  || 0);
 
-  // Apply any equipment-only stats not in base
-  for (const [statKey, value] of Object.entries(bonus)) {
-    if (!(statKey in base)) {
-      player[statKey] = value;
+  // ------------------ HP HANDLING (FIXED) ------------------
+  if (!player.isDead) {
+    if (preserveHpRatio && oldMaxHp > 0) {
+      const ratio = oldHp / oldMaxHp;
+      player.hp = Math.floor(player.maxHp * ratio);
+    } else {
+      player.hp = player.maxHp;
     }
   }
 
-  // ------------------ RESTORE HP RATIO ------------------
-  if (preserveHpRatio) {
-    // Only preserve ratio if player is alive
-    if (!player.isDead) {
-      const oldHp = player.hp ?? player.maxHp;
-      const oldMaxHp = player.maxHp ?? oldHp;
-      const hpRatio = oldHp / oldMaxHp;
-      player.hp = Math.round(player.maxHp * hpRatio);
-      if (player.hp > player.maxHp) player.hp = player.maxHp;
-    }
-  } else {
-    // full heal if not preserving ratio (e.g., respawn)
-    player.hp = player.maxHp;
-  }
-
-  // ------------------ ENSURE STATS EXIST ------------------
-  if (!player.stats) player.stats = {};
-  for (const statKey of Object.keys(player.stats)) {
-    player.stats[statKey] = player.stats[statKey]; // preserve allocations
-  }
+  // HARD CLAMP (IMPORTANT)
+  if (!Number.isFinite(player.hp) || player.hp < 0) player.hp = 0;
+  if (player.hp > player.maxHp) player.hp = player.maxHp;
 }
 
 
