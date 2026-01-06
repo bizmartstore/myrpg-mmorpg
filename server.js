@@ -197,50 +197,36 @@ function cleanupMapIfEmpty(mapId) {
 function spawnMonsters(mapId) {
   const config = MONSTER_SPAWNS[mapId];
   if (!config) return;
-
   if (!mapMonsters.has(mapId)) mapMonsters.set(mapId, new Set());
   const monsterSet = mapMonsters.get(mapId);
-
-  // Don't spawn more than config.count
   if (monsterSet.size >= config.count) return;
 
   for (let i = monsterSet.size; i < config.count; i++) {
     const type = config.types[Math.floor(Math.random() * config.types.length)];
     const stats = MONSTER_STATS[type];
     const monsterId = `${mapId}_${type}_${Date.now()}_${i}`;
-
     const x = config.bounds.minX + Math.random() * (config.bounds.maxX - config.bounds.minX);
     const y = config.bounds.minY + Math.random() * (config.bounds.maxY - config.bounds.minY);
 
-    // ------------------ UPDATED MONSTER OBJECT ------------------
     const monster = {
       id: monsterId,
       type,
       mapId,
-      x, 
-      y, 
-      spawnX: x, 
-      spawnY: y,
-      direction: 'front',
-      state: 'idle',
-      hp: stats.hp,
-      maxHp: stats.hp,
-      attack: stats.attack,
-      speed: stats.speed,
+      x, y, spawnX: x, spawnY: y,
+      direction: 'front', state: 'idle',
+      hp: stats.hp, maxHp: stats.hp,
+      attack: stats.attack, speed: stats.speed,
       aggroRange: stats.aggro,
       attackRange: stats.attackRange,
       attackCooldown: stats.cooldown,
       lastAttack: 0,
-      attackEndTime: 0, // new field
       target: null,
-      lastUpdate: Date.now(),
-      isDead: false // new field
+      lastUpdate: Date.now()
     };
 
     monsters.set(monsterId, monster);
     monsterSet.add(monsterId);
 
-    // Broadcast spawn to all players
     broadcastToMap(mapId, 'monster:spawn', {
       id: monsterId,
       type,
@@ -260,20 +246,13 @@ function spawnMonsters(mapId) {
 
 // ------------------ MONSTER ATTACK PLAYER ------------------
 function monsterAttackPlayer(monster, targetPlayer) {
-  // ---------- SAFETY GUARDS ----------
-  if (!monster) return;
-  if (!targetPlayer) return;
-  if (targetPlayer.isDead) return;
-  if (!Number.isFinite(targetPlayer.hp)) return;
-  if (!targetPlayer.socketId) return;
+  if (!targetPlayer || targetPlayer.isDead) return;
 
-  // ---------- DAMAGE ----------
-  const damage = Math.max(0, Math.floor(monster.attack || 0));
+  // Apply damage
+  const damage = monster.attack;
+  targetPlayer.hp = Math.max(0, targetPlayer.hp - damage);
 
-  // ---------- APPLY DAMAGE ----------
-  targetPlayer.hp = Math.max(0, Math.floor(targetPlayer.hp - damage));
-
-  // ---------- SYNC TARGET ----------
+  // Notify the target
   io.to(targetPlayer.socketId).emit('player:hpChanged', {
     hp: targetPlayer.hp,
     maxHp: targetPlayer.maxHp,
@@ -281,7 +260,7 @@ function monsterAttackPlayer(monster, targetPlayer) {
     attacker: monster.id
   });
 
-  // ---------- AOI BROADCAST ----------
+  // Broadcast to AOI
   broadcastToAOI(
     targetPlayer.email,
     targetPlayer.x,
@@ -295,7 +274,7 @@ function monsterAttackPlayer(monster, targetPlayer) {
     }
   );
 
-  // ---------- DEATH CHECK (FIX) ----------
+  // Trigger death if HP depleted
   if (targetPlayer.hp <= 0) {
     handlePlayerDeath(targetPlayer);
   }
@@ -303,28 +282,21 @@ function monsterAttackPlayer(monster, targetPlayer) {
 
 function updateMonsterAI() {
   const now = Date.now();
-
   for (const [monsterId, monster] of monsters.entries()) {
-    // ------------------ SKIP DEAD OR MISSING MONSTERS ------------------
-    if (!monster || monster.isDead || monster.hp <= 0) continue;
+    if (monster.hp <= 0) continue;
 
     const playersInMap = mapPlayers.get(monster.mapId);
-    if (!playersInMap || playersInMap.size === 0) {
-      monster.state = 'idle';
-      monster.target = null;
-      continue;
-    }
+    if (!playersInMap || playersInMap.size === 0) continue;
 
-    // ------------------ FIND CLOSEST PLAYER ------------------
     let closestPlayer = null;
     let closestDist = Infinity;
 
+    // Find closest player within aggro range
     for (const email of playersInMap) {
       const p = players.get(email);
       if (!p || p.isDead) continue;
-
       const dist = getDistance(monster.x, monster.y, p.x, p.y);
-      if (dist < closestDist && dist <= monster.aggroRange) {
+      if (dist < closestDist && dist < monster.aggroRange) {
         closestDist = dist;
         closestPlayer = p;
       }
@@ -333,20 +305,16 @@ function updateMonsterAI() {
     if (closestPlayer) {
       monster.target = closestPlayer.email;
 
-      // ------------------ CHASE PLAYER ------------------
       if (closestDist > monster.attackRange) {
+        // -------------------- CHASE --------------------
         const angle = Math.atan2(closestPlayer.y - monster.y, closestPlayer.x - monster.x);
         monster.x += Math.cos(angle) * monster.speed;
         monster.y += Math.sin(angle) * monster.speed;
-
-        // Determine direction
         monster.direction = Math.abs(Math.cos(angle)) > Math.abs(Math.sin(angle))
           ? (Math.cos(angle) > 0 ? 'right' : 'left')
           : (Math.sin(angle) > 0 ? 'front' : 'back');
-
         monster.state = 'chasing';
 
-        // Broadcast movement periodically
         if (now - monster.lastUpdate > 100) {
           broadcastToMap(monster.mapId, 'monster:move', {
             id: monsterId,
@@ -358,15 +326,13 @@ function updateMonsterAI() {
           });
           monster.lastUpdate = now;
         }
-
       } else {
-        // ------------------ ATTACK PLAYER ------------------
-        if (!monster.lastAttack || now - monster.lastAttack >= monster.attackCooldown) {
+        // -------------------- ATTACK --------------------
+        if (now - monster.lastAttack > monster.attackCooldown) {
           monster.state = 'attacking';
           monster.lastAttack = now;
-          monster.attackEndTime = now + 400; // attack animation duration
 
-          // Broadcast attack
+          // Broadcast attack animation
           broadcastToMap(monster.mapId, 'monster:attack', {
             id: monsterId,
             mapId: monster.mapId,
@@ -377,51 +343,36 @@ function updateMonsterAI() {
             direction: monster.direction
           });
 
-          // Deal damage
+          // Deal damage to player & auto-death check
           monsterAttackPlayer(monster, closestPlayer);
-        }
 
-        // Return to idle automatically after attack
-        if (monster.attackEndTime && now >= monster.attackEndTime) {
-          monster.state = 'idle';
-          monster.attackEndTime = null;
+          setTimeout(() => {
+            if (monster.hp > 0) monster.state = 'idle';
+          }, 400);
         }
       }
-
     } else {
-      // ------------------ NO TARGET: IDLE / WANDER ------------------
+      // -------------------- IDLE / WANDER --------------------
       monster.target = null;
-
-      if (now - monster.lastUpdate > 500) {
-        monster.state = 'idle';
-
-        // Random wandering
-        if (Math.random() > 0.98) {
-          const angle = Math.random() * Math.PI * 2;
-          monster.x += Math.cos(angle) * 10;
-          monster.y += Math.sin(angle) * 10;
-
-          // Clamp to map boundaries
-          monster.x = Math.max(0, Math.min(monster.x, MAP_WIDTH));
-          monster.y = Math.max(0, Math.min(monster.y, MAP_HEIGHT));
-
-          broadcastToMap(monster.mapId, 'monster:move', {
-            id: monsterId,
-            mapId: monster.mapId,
-            x: monster.x,
-            y: monster.y,
-            direction: monster.direction,
-            state: 'idle'
-          });
-        }
-
+      monster.state = 'idle';
+      if (Math.random() > 0.99 && now - monster.lastUpdate > 500) {
+        const angle = Math.random() * Math.PI * 2;
+        monster.x += Math.cos(angle) * 10;
+        monster.y += Math.sin(angle) * 10;
+        broadcastToMap(monster.mapId, 'monster:move', {
+          id: monsterId,
+          mapId: monster.mapId,
+          x: monster.x,
+          y: monster.y,
+          direction: monster.direction,
+          state: 'idle'
+        });
         monster.lastUpdate = now;
       }
     }
   }
 }
 
-// ------------------ RUN AI EVERY 100ms ------------------
 setInterval(updateMonsterAI, 100);
 
 
