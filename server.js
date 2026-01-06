@@ -275,9 +275,10 @@ function monsterAttackPlayer(monster, targetPlayer) {
   );
 
   // Trigger death if HP depleted
-  if (targetPlayer.hp <= 0) {
-    handlePlayerDeath(targetPlayer);
-  }
+  if (targetPlayer.hp <= 0 && !targetPlayer.isDead) {
+  targetPlayer.isDead = true;   // 🔒 LOCK IT FIRST
+  handlePlayerDeath(targetPlayer);
+}
 }
 
 function updateMonsterAI() {
@@ -909,34 +910,28 @@ socket.on('monster:hit', ({ monsterId }) => {
     );
   });
 
-// ------------------ PLAYER GETS HIT ------------------
+// ------------------ PLAYER GETS HIT (PvP ONLY) ------------------
 socket.on('player:hit', (data) => {
   if (!currentPlayer || currentPlayer.isDead) return;
 
-  const { damage, attackerEmail } = data; // attackerEmail can be player or monster
-  const attacker = attackerEmail ? players.get(attackerEmail) : null;
+  const { damage, attackerEmail } = data;
 
-  // PvP enforcement: allow only in PvP maps
-  if (attacker && currentPlayer.map !== 'pvp_arena') {
-    // Ignore PvP damage outside PvP map
-    io.to(currentPlayer.socketId).emit('player:hitDenied', {
-      message: 'You cannot attack other players outside the PvP arena.'
-    });
-    return;
-  }
+  // ✅ PvP ONLY
+  if (currentPlayer.map !== 'pvp_arena') return;
 
-  // Reduce HP safely
+  const attacker = players.get(attackerEmail);
+  if (!attacker || attacker.isDead) return;
+
+  // Apply damage
   currentPlayer.hp = Math.max(0, currentPlayer.hp - damage);
 
-  // Notify this player of damage
   io.to(currentPlayer.socketId).emit('player:hpChanged', {
     hp: currentPlayer.hp,
     maxHp: currentPlayer.maxHp,
     damage,
-    attacker: attackerEmail || null
+    attacker: attackerEmail
   });
 
-  // Broadcast to nearby players so they can show hit effect
   broadcastToAOI(
     currentPlayer.email,
     currentPlayer.x,
@@ -946,29 +941,14 @@ socket.on('player:hit', (data) => {
     {
       email: currentPlayer.email,
       damage,
-      attacker: attackerEmail || null
+      attacker: attackerEmail
     }
   );
 
-  // Check for death
-  if (currentPlayer.hp <= 0) {
-    // PvP death logic: respawn in PvP arena at spawn point
-    if (currentPlayer.map === 'pvp_arena') {
-      currentPlayer.hp = currentPlayer.maxHp;
-      currentPlayer.x = MAPS.pvp_arena.spawnX;
-      currentPlayer.y = MAPS.pvp_arena.spawnY;
-
-      io.to(currentPlayer.socketId).emit('player:revived', {
-        hp: currentPlayer.hp,
-        maxHp: currentPlayer.maxHp,
-        map: 'pvp_arena',
-        x: currentPlayer.x,
-        y: currentPlayer.y
-      });
-    } else {
-      // Normal death handling
-      handlePlayerDeath(currentPlayer);
-    }
+  // ✅ DEATH LOCK
+  if (currentPlayer.hp <= 0 && !currentPlayer.isDead) {
+    currentPlayer.isDead = true;
+    handlePvPDeath(currentPlayer);
   }
 });
 
