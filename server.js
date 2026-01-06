@@ -275,29 +275,35 @@ function monsterAttackPlayer(monster, targetPlayer) {
   );
 
   // Trigger death if HP depleted
-  if (targetPlayer.hp <= 0 && !targetPlayer.isDead) {
-  targetPlayer.isDead = true;   // 🔒 LOCK IT FIRST
-  handlePlayerDeath(targetPlayer);
-}
+  if (targetPlayer.hp <= 0) {
+    handlePlayerDeath(targetPlayer);
+  }
 }
 
 function updateMonsterAI() {
   const now = Date.now();
+
   for (const [monsterId, monster] of monsters.entries()) {
-    if (monster.hp <= 0) continue;
+    // ------------------ SKIP DEAD OR MISSING MONSTERS ------------------
+    if (!monster || monster.isDead || monster.hp <= 0) continue;
 
     const playersInMap = mapPlayers.get(monster.mapId);
-    if (!playersInMap || playersInMap.size === 0) continue;
+    if (!playersInMap || playersInMap.size === 0) {
+      monster.state = 'idle';
+      monster.target = null;
+      continue;
+    }
 
+    // ------------------ FIND CLOSEST PLAYER ------------------
     let closestPlayer = null;
     let closestDist = Infinity;
 
-    // Find closest player within aggro range
     for (const email of playersInMap) {
       const p = players.get(email);
       if (!p || p.isDead) continue;
+
       const dist = getDistance(monster.x, monster.y, p.x, p.y);
-      if (dist < closestDist && dist < monster.aggroRange) {
+      if (dist < closestDist && dist <= monster.aggroRange) {
         closestDist = dist;
         closestPlayer = p;
       }
@@ -306,16 +312,20 @@ function updateMonsterAI() {
     if (closestPlayer) {
       monster.target = closestPlayer.email;
 
+      // ------------------ CHASE PLAYER ------------------
       if (closestDist > monster.attackRange) {
-        // -------------------- CHASE --------------------
         const angle = Math.atan2(closestPlayer.y - monster.y, closestPlayer.x - monster.x);
         monster.x += Math.cos(angle) * monster.speed;
         monster.y += Math.sin(angle) * monster.speed;
+
+        // Determine direction
         monster.direction = Math.abs(Math.cos(angle)) > Math.abs(Math.sin(angle))
           ? (Math.cos(angle) > 0 ? 'right' : 'left')
           : (Math.sin(angle) > 0 ? 'front' : 'back');
+
         monster.state = 'chasing';
 
+        // Broadcast movement periodically
         if (now - monster.lastUpdate > 100) {
           broadcastToMap(monster.mapId, 'monster:move', {
             id: monsterId,
@@ -327,13 +337,15 @@ function updateMonsterAI() {
           });
           monster.lastUpdate = now;
         }
+
       } else {
-        // -------------------- ATTACK --------------------
-        if (now - monster.lastAttack > monster.attackCooldown) {
+        // ------------------ ATTACK PLAYER ------------------
+        if (!monster.lastAttack || now - monster.lastAttack >= monster.attackCooldown) {
           monster.state = 'attacking';
           monster.lastAttack = now;
+          monster.attackEndTime = now + 400; // attack animation duration
 
-          // Broadcast attack animation
+          // Broadcast attack
           broadcastToMap(monster.mapId, 'monster:attack', {
             id: monsterId,
             mapId: monster.mapId,
@@ -344,36 +356,51 @@ function updateMonsterAI() {
             direction: monster.direction
           });
 
-          // Deal damage to player & auto-death check
+          // Deal damage
           monsterAttackPlayer(monster, closestPlayer);
+        }
 
-          setTimeout(() => {
-            if (monster.hp > 0) monster.state = 'idle';
-          }, 400);
+        // Return to idle automatically after attack
+        if (monster.attackEndTime && now >= monster.attackEndTime) {
+          monster.state = 'idle';
+          monster.attackEndTime = null;
         }
       }
+
     } else {
-      // -------------------- IDLE / WANDER --------------------
+      // ------------------ NO TARGET: IDLE / WANDER ------------------
       monster.target = null;
-      monster.state = 'idle';
-      if (Math.random() > 0.99 && now - monster.lastUpdate > 500) {
-        const angle = Math.random() * Math.PI * 2;
-        monster.x += Math.cos(angle) * 10;
-        monster.y += Math.sin(angle) * 10;
-        broadcastToMap(monster.mapId, 'monster:move', {
-          id: monsterId,
-          mapId: monster.mapId,
-          x: monster.x,
-          y: monster.y,
-          direction: monster.direction,
-          state: 'idle'
-        });
+
+      if (now - monster.lastUpdate > 500) {
+        monster.state = 'idle';
+
+        // Random wandering
+        if (Math.random() > 0.98) {
+          const angle = Math.random() * Math.PI * 2;
+          monster.x += Math.cos(angle) * 10;
+          monster.y += Math.sin(angle) * 10;
+
+          // Clamp to map boundaries
+          monster.x = Math.max(0, Math.min(monster.x, MAP_WIDTH));
+          monster.y = Math.max(0, Math.min(monster.y, MAP_HEIGHT));
+
+          broadcastToMap(monster.mapId, 'monster:move', {
+            id: monsterId,
+            mapId: monster.mapId,
+            x: monster.x,
+            y: monster.y,
+            direction: monster.direction,
+            state: 'idle'
+          });
+        }
+
         monster.lastUpdate = now;
       }
     }
   }
 }
 
+// ------------------ RUN AI EVERY 100ms ------------------
 setInterval(updateMonsterAI, 100);
 
 
@@ -910,28 +937,34 @@ socket.on('monster:hit', ({ monsterId }) => {
     );
   });
 
-// ------------------ PLAYER GETS HIT (PvP ONLY) ------------------
+// ------------------ PLAYER GETS HIT ------------------
 socket.on('player:hit', (data) => {
   if (!currentPlayer || currentPlayer.isDead) return;
 
-  const { damage, attackerEmail } = data;
+  const { damage, attackerEmail } = data; // attackerEmail can be player or monster
+  const attacker = attackerEmail ? players.get(attackerEmail) : null;
 
-  // ✅ PvP ONLY
-  if (currentPlayer.map !== 'pvp_arena') return;
+  // PvP enforcement: allow only in PvP maps
+  if (attacker && currentPlayer.map !== 'pvp_arena') {
+    // Ignore PvP damage outside PvP map
+    io.to(currentPlayer.socketId).emit('player:hitDenied', {
+      message: 'You cannot attack other players outside the PvP arena.'
+    });
+    return;
+  }
 
-  const attacker = players.get(attackerEmail);
-  if (!attacker || attacker.isDead) return;
-
-  // Apply damage
+  // Reduce HP safely
   currentPlayer.hp = Math.max(0, currentPlayer.hp - damage);
 
+  // Notify this player of damage
   io.to(currentPlayer.socketId).emit('player:hpChanged', {
     hp: currentPlayer.hp,
     maxHp: currentPlayer.maxHp,
     damage,
-    attacker: attackerEmail
+    attacker: attackerEmail || null
   });
 
+  // Broadcast to nearby players so they can show hit effect
   broadcastToAOI(
     currentPlayer.email,
     currentPlayer.x,
@@ -941,14 +974,29 @@ socket.on('player:hit', (data) => {
     {
       email: currentPlayer.email,
       damage,
-      attacker: attackerEmail
+      attacker: attackerEmail || null
     }
   );
 
-  // ✅ DEATH LOCK
-  if (currentPlayer.hp <= 0 && !currentPlayer.isDead) {
-    currentPlayer.isDead = true;
-    handlePvPDeath(currentPlayer);
+  // Check for death
+  if (currentPlayer.hp <= 0) {
+    // PvP death logic: respawn in PvP arena at spawn point
+    if (currentPlayer.map === 'pvp_arena') {
+      currentPlayer.hp = currentPlayer.maxHp;
+      currentPlayer.x = MAPS.pvp_arena.spawnX;
+      currentPlayer.y = MAPS.pvp_arena.spawnY;
+
+      io.to(currentPlayer.socketId).emit('player:revived', {
+        hp: currentPlayer.hp,
+        maxHp: currentPlayer.maxHp,
+        map: 'pvp_arena',
+        x: currentPlayer.x,
+        y: currentPlayer.y
+      });
+    } else {
+      // Normal death handling
+      handlePlayerDeath(currentPlayer);
+    }
   }
 });
 
