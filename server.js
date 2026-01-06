@@ -537,7 +537,8 @@ socket.on('player:join', (data) => {
   players.set(email, currentPlayer);
 
   // Apply equipment bonuses
-  recalcPlayerWithEquipment(currentPlayer);
+  recalcPlayerWithEquipment(currentPlayer, { preserveHpRatio: false });
+  currentPlayer.hp = currentPlayer.maxHp; // ✅ ensure full HP on join
 
   // ------------------ MAP REGISTRATION ------------------
   if (!mapPlayers.has(map)) mapPlayers.set(map, new Set());
@@ -1190,28 +1191,10 @@ function handlePvPDeath(player) {
   }, 3000);
 }
 
-function recalcPlayerWithEquipment(player) {
+function recalcPlayerWithEquipment(player, options = {}) {
   if (!player) return;
 
-  // ------------------ PRESERVE RATIOS ------------------
-  // Collect all numeric properties of player that are "derived stats"
-  const derivedKeys = ['hp', 'maxHp', 'attack', 'speed']; // base keys
-  const ratios = {};
-
-  // Include any additional numeric derived stats dynamically
-  for (const key of Object.keys(player)) {
-    if (typeof player[key] === 'number' && !derivedKeys.includes(key)) {
-      derivedKeys.push(key);
-    }
-  }
-
-  // Save current ratios
-  for (const key of derivedKeys) {
-    const oldValue = player[key] ?? 1;
-    const maxValueKey = key === 'hp' ? 'maxHp' : key; // for HP ratio
-    const maxValue = player[maxValueKey] ?? oldValue;
-    ratios[key] = oldValue / maxValue;
-  }
+  const preserveHpRatio = options.preserveHpRatio ?? true; // default: true
 
   // ------------------ CALCULATE BASE DERIVED STATS ------------------
   const base = calculateDerivedStats(player);
@@ -1241,21 +1224,25 @@ function recalcPlayerWithEquipment(player) {
     }
   }
 
-  // ------------------ RESTORE RATIOS ------------------
-  for (const key of Object.keys(ratios)) {
-    if (key === 'hp') {
-      // HP ratio applied to maxHp
-      player.hp = Math.round((player.maxHp ?? 1) * ratios.hp);
+  // ------------------ RESTORE HP RATIO ------------------
+  if (preserveHpRatio) {
+    // Only preserve ratio if player is alive
+    if (!player.isDead) {
+      const oldHp = player.hp ?? player.maxHp;
+      const oldMaxHp = player.maxHp ?? oldHp;
+      const hpRatio = oldHp / oldMaxHp;
+      player.hp = Math.round(player.maxHp * hpRatio);
       if (player.hp > player.maxHp) player.hp = player.maxHp;
-    } else {
-      player[key] = Math.round((player[key] ?? 1) * ratios[key]);
     }
+  } else {
+    // full heal if not preserving ratio (e.g., respawn)
+    player.hp = player.maxHp;
   }
 
   // ------------------ ENSURE STATS EXIST ------------------
   if (!player.stats) player.stats = {};
   for (const statKey of Object.keys(player.stats)) {
-    player.stats[statKey] = player.stats[statKey]; // keep allocation intact
+    player.stats[statKey] = player.stats[statKey]; // preserve allocations
   }
 }
 
