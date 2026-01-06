@@ -7,6 +7,8 @@ const cors = require('cors');
 const app = express();
 app.use(cors());
 
+app.get('/health', (_, res) => res.send('OK'));
+
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] }
@@ -713,20 +715,21 @@ socket.on('player:pvpAttack', (data) => {
 
   const target = players.get(targetEmail);
   if (!target || target.isDead) return;
-  
+
   // Only allow PvP in pvp_arena
   if (currentPlayer.map !== 'pvp_arena' || target.map !== 'pvp_arena') return;
 
-  // ------------------ Calculate damage ------------------
-  let damage = currentPlayer.attack;
+  // ------------------ Calculate damage (server authoritative) ------------------
+  const calculateDamage = (player) => {
+    let dmg = player.attack; // already includes STR bonus from recalcPlayerWithEquipment
+    // Critical hit based on LUCK
+    if (Math.random() < (player.stats.LUCK || 0) * 0.05) {
+      dmg *= 2;
+    }
+    return Math.round(dmg);
+  };
 
-  // STR increases damage
-  damage += currentPlayer.stats.STR * 2;
-
-  // LUCK for crits (double damage)
-  if (Math.random() < currentPlayer.stats.LUCK * 0.05) {
-    damage *= 2;
-  }
+  const damage = calculateDamage(currentPlayer);
 
   // Apply damage to target
   target.hp = Math.max(0, target.hp - damage);
@@ -746,12 +749,12 @@ socket.on('player:pvpAttack', (data) => {
     attacker: currentPlayer.email
   });
 
-  // Optional: notify nearby players via AOI (throttle if needed)
-  // broadcastToAOI(currentPlayer.email, currentPlayer.x, currentPlayer.y, currentPlayer.map, 'player:pvpHit', {
-  //   attacker: currentPlayer.email,
-  //   target: targetEmail,
-  //   damage
-  // });
+  // Notify nearby players (AOI)
+  broadcastToAOI(currentPlayer.email, currentPlayer.x, currentPlayer.y, currentPlayer.map, 'player:pvpHit', {
+    attacker: currentPlayer.email,
+    target: targetEmail,
+    damage
+  });
 
   // ------------------ Check death & respawn ------------------
   if (target.hp <= 0) {
@@ -1067,27 +1070,52 @@ socket.on('player:changeMap', (data) => {
 
 
  // ------------------ DISCONNECT ------------------
-  socket.on('disconnect', () => {
-    if (!currentPlayer) return;
+socket.on('disconnect', async () => {
+  if (!currentPlayer) return;
 
-    console.log(`Player ${currentPlayer.name} disconnected`);
+  console.log(`Player ${currentPlayer.name} disconnected`);
 
-    if (mapPlayers.has(currentPlayer.map)) {
-      mapPlayers.get(currentPlayer.map).delete(currentPlayer.email);
-      broadcastToAOI(
-        currentPlayer.email,
-        currentPlayer.x,
-        currentPlayer.y,
-        currentPlayer.map,
-        'player:left',
-        currentPlayer.email
-      );
-      cleanupMapIfEmpty(currentPlayer.map);
-    }
+  // Remove from map presence (this is correct)
+  if (mapPlayers.has(currentPlayer.map)) {
+    mapPlayers.get(currentPlayer.map).delete(currentPlayer.email);
 
-    players.delete(currentPlayer.email);
-  });
+    broadcastToAOI(
+      currentPlayer.email,
+      currentPlayer.x,
+      currentPlayer.y,
+      currentPlayer.map,
+      'player:left',
+      currentPlayer.email
+    );
+
+    cleanupMapIfEmpty(currentPlayer.map);
+  }
+
+  // IMPORTANT: do NOT delete the player
+  // Keep server state authoritative
+  currentPlayer.socketId = null;
+  currentPlayer.isOnline = false;
+
+  // OPTIONAL BUT RECOMMENDED: save authoritative state
+  try {
+    await savePlayerStats(currentPlayer);
+  } catch (err) {
+    console.error('Failed to save player on disconnect', err);
+  }
 });
+
+
+async function savePlayerStats(player) {
+  await base44.entities.PlayerProfile.update(player.profileId, {
+    str: player.stats.STR,
+    agi: player.stats.AGI,
+    vit: player.stats.VIT,
+    int: player.stats.INT,
+    dex: player.stats.DEX,
+    luck: player.stats.LUCK,
+    stat_points: player.statPointsAvailable
+  });
+}
 
 // ------------------ PLAYER DEATH HANDLER ------------------
 function handlePlayerDeath(player) {
@@ -1162,27 +1190,74 @@ function handlePvPDeath(player) {
 }
 
 function recalcPlayerWithEquipment(player) {
-  const base = calculateDerivedStats(player);
+  if (!player) return;
 
-  let bonusHp = 0;
-  let bonusAtk = 0;
-  let bonusSpeed = 0;
+  // ------------------ PRESERVE RATIOS ------------------
+  // Collect all numeric properties of player that are "derived stats"
+  const derivedKeys = ['hp', 'maxHp', 'attack', 'speed']; // base keys
+  const ratios = {};
 
-  if (player.equipment) {
-    for (const item of Object.values(player.equipment)) {
-      if (!item) continue;
-      bonusHp += item.hp || 0;
-      bonusAtk += item.attack || 0;
-      bonusSpeed += item.speed || 0;
+  // Include any additional numeric derived stats dynamically
+  for (const key of Object.keys(player)) {
+    if (typeof player[key] === 'number' && !derivedKeys.includes(key)) {
+      derivedKeys.push(key);
     }
   }
 
-  player.maxHp = base.maxHp + bonusHp;
-  player.attack = base.attack + bonusAtk;
-  player.speed = base.speed + bonusSpeed;
+  // Save current ratios
+  for (const key of derivedKeys) {
+    const oldValue = player[key] ?? 1;
+    const maxValueKey = key === 'hp' ? 'maxHp' : key; // for HP ratio
+    const maxValue = player[maxValueKey] ?? oldValue;
+    ratios[key] = oldValue / maxValue;
+  }
 
-  player.hp = Math.min(player.hp, player.maxHp);
+  // ------------------ CALCULATE BASE DERIVED STATS ------------------
+  const base = calculateDerivedStats(player);
+
+  // ------------------ APPLY EQUIPMENT BONUSES ------------------
+  const bonus = {};
+  if (player.equipment) {
+    for (const item of Object.values(player.equipment)) {
+      if (!item) continue;
+      for (const [statKey, value] of Object.entries(item)) {
+        if (typeof value === 'number') {
+          bonus[statKey] = (bonus[statKey] || 0) + value;
+        }
+      }
+    }
+  }
+
+  // ------------------ APPLY BASE + EQUIPMENT ------------------
+  for (const [statKey, baseValue] of Object.entries(base)) {
+    player[statKey] = (baseValue || 0) + (bonus[statKey] || 0);
+  }
+
+  // Apply any equipment-only stats not in base
+  for (const [statKey, value] of Object.entries(bonus)) {
+    if (!(statKey in base)) {
+      player[statKey] = value;
+    }
+  }
+
+  // ------------------ RESTORE RATIOS ------------------
+  for (const key of Object.keys(ratios)) {
+    if (key === 'hp') {
+      // HP ratio applied to maxHp
+      player.hp = Math.round((player.maxHp ?? 1) * ratios.hp);
+      if (player.hp > player.maxHp) player.hp = player.maxHp;
+    } else {
+      player[key] = Math.round((player[key] ?? 1) * ratios[key]);
+    }
+  }
+
+  // ------------------ ENSURE STATS EXIST ------------------
+  if (!player.stats) player.stats = {};
+  for (const statKey of Object.keys(player.stats)) {
+    player.stats[statKey] = player.stats[statKey]; // keep allocation intact
+  }
 }
+
 
 
 
