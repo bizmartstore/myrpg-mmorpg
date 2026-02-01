@@ -19,16 +19,80 @@ const AOI_RADIUS = 800; // pixels
 
 // ================= MAP DEFINITIONS (SERVER AUTHORITATIVE) =================
 const MAPS = {
-  town_1: { id: 'town_1', spawnX: 1200, spawnY: 900, safeZone: true },
-  monster_field_1: { id: 'monster_field_1', spawnX: 400, spawnY: 400, safeZone: false },
-  pvp_arena: { 
+  town_1: {
+    id: 'town_1',
+    spawnX: 1200,
+    spawnY: 900,
+    safeZone: true,
+    minMonsterLevel: 0,
+    maxMonsterLevel: 0
+  },
+
+  monster_field_1: {
+    id: 'monster_field_1',
+    spawnX: 400,
+    spawnY: 400,
+    safeZone: false,
+    minMonsterLevel: 1,
+    maxMonsterLevel: 5
+  },
+
+  monster_field_2: {
+    id: 'monster_field_2',
+    spawnX: 800,
+    spawnY: 600,
+    safeZone: false,
+    minMonsterLevel: 6,
+    maxMonsterLevel: 10
+  },
+
+  monster_field_3: {
+    id: 'monster_field_3',
+    spawnX: 1000,
+    spawnY: 500,
+    safeZone: false,
+    minMonsterLevel: 11,
+    maxMonsterLevel: 15
+  },
+
+  monster_field_4: {
+    id: 'monster_field_4',
+    spawnX: 1200,
+    spawnY: 700,
+    safeZone: false,
+    minMonsterLevel: 16,
+    maxMonsterLevel: 20
+  },
+
+  monster_field_5: {
+    id: 'monster_field_5',
+    spawnX: 1400,
+    spawnY: 600,
+    safeZone: false,
+    minMonsterLevel: 21,
+    maxMonsterLevel: 25
+  },
+
+  monster_field_6: {
+    id: 'monster_field_6',
+    spawnX: 1600,
+    spawnY: 800,
+    safeZone: false,
+    minMonsterLevel: 26,
+    maxMonsterLevel: 30
+  },
+
+  pvp_arena: {
     id: 'pvp_arena',
     spawnX: 500,
     spawnY: 500,
     safeZone: false,
-    minLevel: 10 // only level 10+ players can enter
+    minLevel: 10,           // only level 10+ players can enter
+    minMonsterLevel: 0,
+    maxMonsterLevel: 0
   }
 };
+
 
 
 // ================= PLAYER STAT SCALING (MMORPG FORMULA) =================
@@ -116,21 +180,113 @@ const mapPlayers = new Map();   // mapId -> Set of emails
 const monsters = new Map();     // monsterId -> monster object
 const mapMonsters = new Map();  // mapId -> Set of monsterIds
 
-// ================= MONSTER CONFIG =================
+// ================= MONSTER TYPES =================
+const MONSTER_TYPES = [
+  'sparklingSlime', // weak, common
+  'forestImp',      // light melee
+  'rockBeast',      // tanky
+  'shadowHound',    // fast & aggressive
+  'fireWisp',       // ranged magic
+  'mudGolem',       // slow but strong
+  'wingedSerpent',  // flying, medium
+  'crystalCrawler', // armored
+  'stormRaven',     // high speed
+  'lavaElemental'   // high HP & attack, rare
+];
+
+// ================= MONSTER SPAWNS BY MAP =================
 const MONSTER_SPAWNS = {
-  monster_field_1: {
-    count: 20,
-    types: ['poring', 'lunatic', 'fabre', 'chonchon'],
-    bounds: { minX: 100, maxX: 2300, minY: 100, maxY: 1800 }
-  }
+  monster_field_1: { count: 20, minLevel: 1,  maxLevel: 5,  bounds: { minX: 100, maxX: 2300, minY: 100, maxY: 1800 } },
+  monster_field_2: { count: 25, minLevel: 6,  maxLevel: 10, bounds: { minX: 200, maxX: 2500, minY: 100, maxY: 1800 } },
+  monster_field_3: { count: 30, minLevel: 11, maxLevel: 15, bounds: { minX: 300, maxX: 2600, minY: 200, maxY: 1900 } },
+  monster_field_4: { count: 35, minLevel: 16, maxLevel: 20, bounds: { minX: 400, maxX: 2700, minY: 300, maxY: 2000 } },
+  monster_field_5: { count: 40, minLevel: 21, maxLevel: 25, bounds: { minX: 500, maxX: 2800, minY: 400, maxY: 2100 } },
+  monster_field_6: { count: 50, minLevel: 26, maxLevel: 30, bounds: { minX: 600, maxX: 3000, minY: 500, maxY: 2200 } }
 };
 
-const MONSTER_STATS = {
-  poring:   { hp: 50, attack: 5, speed: 1.5, aggro: 150, attackRange: 40, cooldown: 1500, xp: 5, loot: ['potion'] },
-  lunatic:  { hp: 60, attack: 8, speed: 2,   aggro: 180, attackRange: 50, cooldown: 1300, xp: 8, loot: ['potion','coin'] },
-  fabre:    { hp: 45, attack: 6, speed: 1.8, aggro: 160, attackRange: 45, cooldown: 1400, xp: 6, loot: ['coin'] },
-  chonchon: { hp: 55, attack: 7, speed: 2.2, aggro: 200, attackRange: 60, cooldown: 1200, xp: 10, loot: ['potion','coin','gem'] }
+// ================= MONSTER BASE STATS =================
+const MONSTER_BASE_STATS = {
+  sparklingSlime: { hp: 30, attack: 4, speed: 1.2, aggro: 100, attackRange: 30, cooldown: 1200, xp: 5, loot: ['potion'] },
+  forestImp:      { hp: 40, attack: 6, speed: 1.5, aggro: 150, attackRange: 35, cooldown: 1300, xp: 7, loot: ['potion','coin'] },
+  rockBeast:      { hp: 80, attack: 10, speed: 0.8, aggro: 200, attackRange: 40, cooldown: 1600, xp: 12, loot: ['coin','gem'] },
+  shadowHound:    { hp: 50, attack: 8, speed: 2.0, aggro: 180, attackRange: 40, cooldown: 1100, xp: 10, loot: ['potion','coin'] },
+  fireWisp:       { hp: 35, attack: 10, speed: 1.5, aggro: 120, attackRange: 100, cooldown: 1800, xp: 12, loot: ['manaPotion'] },
+  mudGolem:       { hp: 100, attack: 12, speed: 0.6, aggro: 220, attackRange: 50, cooldown: 2000, xp: 15, loot: ['stone'] },
+  wingedSerpent:  { hp: 60, attack: 9, speed: 2.2, aggro: 180, attackRange: 45, cooldown: 1400, xp: 13, loot: ['gem'] },
+  crystalCrawler: { hp: 90, attack: 11, speed: 0.9, aggro: 200, attackRange: 40, cooldown: 1500, xp: 14, loot: ['crystal'] },
+  stormRaven:     { hp: 45, attack: 7, speed: 2.5, aggro: 160, attackRange: 50, cooldown: 1200, xp: 10, loot: ['feather'] },
+  lavaElemental:  { hp: 150, attack: 20, speed: 1.0, aggro: 250, attackRange: 60, cooldown: 2000, xp: 25, loot: ['lavaStone','gem'] }
 };
+
+// ================= MONSTER STAT GENERATOR =================
+function generateMonsterStats(type, level) {
+  const base = MONSTER_BASE_STATS[type];
+  if (!base) return null;
+
+  return {
+    hp: Math.floor(base.hp + base.hp * 0.15 * (level - 1)),
+    attack: Math.floor(base.attack + base.attack * 0.12 * (level - 1)),
+    speed: parseFloat((base.speed + 0.05 * (level - 1)).toFixed(2)),
+    aggroRange: base.aggro + level * 5,
+    attackRange: base.attackRange,
+    attackCooldown: base.cooldown,
+    xp: Math.floor(base.xp + base.xp * 0.2 * (level - 1)),
+    loot: base.loot
+  };
+}
+
+// ================= SPAWN MONSTERS =================
+function spawnMonsters(mapId) {
+  const config = MONSTER_SPAWNS[mapId];
+  if (!config) return;
+  if (!mapMonsters.has(mapId)) mapMonsters.set(mapId, new Set());
+  const monsterSet = mapMonsters.get(mapId);
+
+  for (let i = monsterSet.size; i < config.count; i++) {
+    const type = MONSTER_TYPES[Math.floor(Math.random() * MONSTER_TYPES.length)];
+    const level = Math.floor(Math.random() * (config.maxLevel - config.minLevel + 1)) + config.minLevel;
+    const stats = generateMonsterStats(type, level);
+
+    const monsterId = `${mapId}_${type}_${Date.now()}_${i}`;
+    const x = config.bounds.minX + Math.random() * (config.bounds.maxX - config.bounds.minX);
+    const y = config.bounds.minY + Math.random() * (config.bounds.maxY - config.bounds.minY);
+
+    const monster = {
+      id: monsterId,
+      type,
+      level,
+      mapId,
+      x, y, spawnX: x, spawnY: y,
+      direction: 'front', state: 'idle',
+      hp: stats.hp, maxHp: stats.hp,
+      attack: stats.attack, speed: stats.speed,
+      aggroRange: stats.aggroRange,
+      attackRange: stats.attackRange,
+      attackCooldown: stats.attackCooldown,
+      lastAttack: 0,
+      target: null,
+      lastUpdate: Date.now(),
+      loot: stats.loot,
+      xp: stats.xp
+    };
+
+    monsters.set(monsterId, monster);
+    monsterSet.add(monsterId);
+
+    broadcastToMap(mapId, 'monster:spawn', {
+      id: monster.id,
+      type: monster.type,
+      mapId: monster.mapId,
+      x: monster.x,
+      y: monster.y,
+      hp: monster.hp,
+      maxHp: monster.maxHp,
+      direction: monster.direction,
+      state: monster.state,
+      level: monster.level
+    });
+  }
+}
 
 // ================= HELPER FUNCTIONS =================
 function getDistance(x1, y1, x2, y2) {
